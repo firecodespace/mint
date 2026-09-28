@@ -75,3 +75,47 @@ export interface Stats {
   total: number;
   by_kind: Record<string, number>;
 }
+
+// ---- chat ----------------------------------------------------------------
+
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface ChatStatus {
+  ollama_up: boolean;
+  models: string[];
+  chat_model: string;
+  fast_model: string;
+}
+
+export interface RetrievedItem {
+  id: string;
+  title: string;
+  kind: string;
+  score: number;
+}
+
+export interface CapturedItem {
+  id: string;
+  title: string;
+  kind: string;
+}
+
+export interface ChatTurnResult {
+  answer: string;
+  retrieved: RetrievedItem[];
+  captured: CapturedItem[];
+}
+
+// Tauri event payloads emitted during a chat turn.
+export interface StageEvent {
+  stage: string; // retrieving | retrieved | thinking | answering | extracting | done
+  detail: string;
+}
+
+export interface TokenEvent {
+  channel: "thinking" | "answer";
+  text: string;
+}

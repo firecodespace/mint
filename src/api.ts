@@ -1,6 +1,9 @@
 // Thin wrappers over Tauri commands exposed by the Rust core.
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ChatMessage,
+  ChatStatus,
+  ChatTurnResult,
   Memory,
   NewMemory,
   SearchRequest,
@@ -26,4 +29,17 @@ export function deleteMemory(id: string): Promise<void> {
 
 export function getStats(): Promise<Stats> {
   return invoke<Stats>("stats");
+}
+
+export function chatStatus(): Promise<ChatStatus> {
+  return invoke<ChatStatus>("chat_status");
+}
+
+/** Run one chat turn. Streaming deltas arrive via Tauri events
+ * (chat:stage, chat:token, chat:captured); this resolves with the final turn. */
+export function chat(
+  message: string,
+  history: ChatMessage[],
+): Promise<ChatTurnResult> {
+  return invoke<ChatTurnResult>("chat", { message, history });
 }

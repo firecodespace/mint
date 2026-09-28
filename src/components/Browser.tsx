@@ -36,14 +36,14 @@ export function Browser({
               <strong>{m.title || "(untitled)"}</strong>
               <span className={`sync ${m.sync_state}`}>{m.sync_state}</span>
               <button className="ghost danger" onClick={() => remove(m.id)} title="Delete">
-                ✕
+                Remove
               </button>
             </div>
             <p className="mem-text">{m.text}</p>
             <div className="mem-meta">
               {m.site_id && <span>site: {m.site_id}</span>}
               {m.asset_id && <span>asset: {m.asset_id}</span>}
-              {m.sensitivity === "local_only" && <span className="lock">🔒 local-only</span>}
+              {m.sensitivity === "local_only" && <span className="lock">local-only</span>}
               {m.tags.map((t) => (
                 <span key={t} className="tag">
                   #{t}

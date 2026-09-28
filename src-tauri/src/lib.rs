@@ -1,20 +1,33 @@
 mod commands;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
 use commands::AppState;
+use mint_core::ollama::{Ollama, DEFAULT_CHAT_MODEL, DEFAULT_FAST_MODEL};
 use mint_core::MemoryEngine;
+
+/// Pick a model: env override -> preferred if pulled -> first available -> default.
+fn choose_model(env_key: &str, preferred: &str, available: &[String]) -> String {
+    if let Ok(m) = std::env::var(env_key) {
+        if !m.trim().is_empty() {
+            return m;
+        }
+    }
+    if available.iter().any(|m| m == preferred) {
+        return preferred.to_string();
+    }
+    available.first().cloned().unwrap_or_else(|| preferred.to_string())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // Where the on-device memory lives. `MINT_DATA_DIR` overrides the
-            // default (used in dev to keep the store inside the project, easy to
-            // inspect); otherwise fall back to the per-user app data dir.
+            // Where the on-device memory lives. MINT_DATA_DIR overrides the
+            // default (used in dev to keep the store inside the project).
             let data_dir = match std::env::var("MINT_DATA_DIR") {
                 Ok(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir),
                 _ => app
@@ -26,8 +39,18 @@ pub fn run() {
             log::info!("Mint data dir: {}", data_dir.display());
 
             let engine = MemoryEngine::open(&data_dir).map_err(|e| e.to_string())?;
+
+            let ollama = Ollama::new();
+            let available = ollama.list_models().unwrap_or_default();
+            let chat_model = choose_model("MINT_CHAT_MODEL", DEFAULT_CHAT_MODEL, &available);
+            let fast_model = choose_model("MINT_FAST_MODEL", DEFAULT_FAST_MODEL, &available);
+            log::info!("Ollama chat model: {chat_model} | fast model: {fast_model}");
+
             app.manage(AppState {
-                engine: Mutex::new(engine),
+                engine: Arc::new(Mutex::new(engine)),
+                ollama: Arc::new(ollama),
+                chat_model,
+                fast_model,
             });
             Ok(())
         })
@@ -37,6 +60,8 @@ pub fn run() {
             commands::list_memories,
             commands::delete_memory,
             commands::stats,
+            commands::chat_status,
+            commands::chat,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

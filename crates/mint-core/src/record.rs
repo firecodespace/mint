@@ -20,6 +20,21 @@ pub enum MemorySource {
     Manual,
     File,
     Sensor,
+    /// Auto-captured from a chat conversation.
+    Chat,
+}
+
+impl MemoryKind {
+    /// Parse a free-form kind string (from an LLM), defaulting to `Note`.
+    pub fn parse_lenient(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "observation" => MemoryKind::Observation,
+            "measurement" => MemoryKind::Measurement,
+            "event" => MemoryKind::Event,
+            "doc_chunk" | "docchunk" | "document" => MemoryKind::DocChunk,
+            _ => MemoryKind::Note,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

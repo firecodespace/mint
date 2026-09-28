@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { searchMemories } from "../api";
 import type { MemoryKind, SearchMode, SearchResponse } from "../types";
-import type { ActivityEvent } from "./ActivityLog";
 
 const MODES: SearchMode[] = ["hybrid", "dense", "sparse"];
 const KIND_FILTERS: (MemoryKind | "")[] = [
@@ -13,11 +12,7 @@ const KIND_FILTERS: (MemoryKind | "")[] = [
   "doc_chunk",
 ];
 
-export function Search({
-  onEvent,
-}: {
-  onEvent: (kind: ActivityEvent["kind"], message: string) => void;
-}) {
+export function Search() {
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<SearchMode>("hybrid");
   const [site, setSite] = useState("");
@@ -38,12 +33,8 @@ export function Search({
         kind: kind || null,
       });
       setResp(r);
-      onEvent(
-        "search",
-        `“${query.trim()}” · ${mode} · ${r.results.length} hits in ${r.latency_ms.toFixed(1)} ms`,
-      );
     } catch (err) {
-      onEvent("error", String(err));
+      console.error(err);
     } finally {
       setBusy(false);
     }
@@ -57,8 +48,7 @@ export function Search({
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Ask the device… e.g. pump pressure problems at site A"
-            autoFocus
+            placeholder="Semantic + keyword search, no network…"
           />
           <button className="primary" type="submit" disabled={busy}>
             {busy ? "…" : "Search"}
@@ -99,7 +89,7 @@ export function Search({
           <div className="results-head">
             <span>{resp.results.length} results</span>
             <span className="latency" title="On-device retrieval latency">
-              ⚡ {resp.latency_ms.toFixed(1)} ms · {resp.mode}
+              {resp.latency_ms.toFixed(1)} ms · {resp.mode}
             </span>
           </div>
           {resp.results.length === 0 && <p className="muted">No matches on device.</p>}

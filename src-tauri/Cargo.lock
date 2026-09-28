@@ -3771,6 +3771,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "fastembed",
+ "log",
  "qdrant-edge",
  "serde",
  "serde_json",

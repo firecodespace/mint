@@ -27,6 +27,7 @@ fastembed = "7.1.0"
 ulid = "3.0.0"
 chrono = "0.4.45"
 anyhow = "1.0.104"
+log = "0.4.34"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

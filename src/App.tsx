@@ -6,11 +6,15 @@ import { Chat } from "./components/Chat";
 import { Capture } from "./components/Capture";
 import { Search } from "./components/Search";
 import { Browser } from "./components/Browser";
+import { MemoryGraph } from "./components/MemoryGraph";
+import { HowItWorks } from "./components/HowItWorks";
 
-type Tab = "chat" | "memory";
+type Tab = "chat" | "memory" | "how";
+type MemView = "graph" | "list";
 
 function App() {
   const [tab, setTab] = useState<Tab>("chat");
+  const [memView, setMemView] = useState<MemView>("graph");
   const [status, setStatus] = useState<ChatStatus | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
@@ -38,7 +42,6 @@ function App() {
     })();
   }, [refresh]);
 
-  // Refresh chat/model status when returning focus (Ollama may start later).
   useEffect(() => {
     const t = setInterval(() => {
       chatStatus().then(setStatus).catch(() => {});
@@ -72,6 +75,9 @@ function App() {
         <button className={tab === "memory" ? "on" : ""} onClick={() => setTab("memory")}>
           Memory <span className="count">{memories.length}</span>
         </button>
+        <button className={tab === "how" ? "on" : ""} onClick={() => setTab("how")}>
+          How it works
+        </button>
       </nav>
 
       {booting ? (
@@ -82,16 +88,41 @@ function App() {
         </div>
       ) : tab === "chat" ? (
         <Chat status={status} onCaptured={refresh} />
-      ) : (
-        <div className="memory-view">
-          <div className="memory-col">
-            <Search />
-            <Capture onAdded={refresh} onError={(e) => console.error(e)} />
+      ) : tab === "memory" ? (
+        <div className="memory-tab">
+          <div className="memory-toolbar">
+            <div className="seg">
+              <button
+                className={memView === "graph" ? "on" : ""}
+                onClick={() => setMemView("graph")}
+              >
+                Graph
+              </button>
+              <button
+                className={memView === "list" ? "on" : ""}
+                onClick={() => setMemView("list")}
+              >
+                List
+              </button>
+            </div>
+            <span className="muted">{memories.length} memories on this device</span>
           </div>
-          <div className="memory-col">
-            <Browser memories={memories} onDeleted={refresh} onError={(e) => console.error(e)} />
-          </div>
+          {memView === "graph" ? (
+            <MemoryGraph memories={memories} />
+          ) : (
+            <div className="memory-view">
+              <div className="memory-col">
+                <Search />
+                <Capture onAdded={refresh} onError={(e) => console.error(e)} />
+              </div>
+              <div className="memory-col">
+                <Browser memories={memories} onDeleted={refresh} onError={(e) => console.error(e)} />
+              </div>
+            </div>
+          )}
         </div>
+      ) : (
+        <HowItWorks />
       )}
     </div>
   );

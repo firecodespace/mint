@@ -85,6 +85,31 @@ is merely asking about.\n\
 - When in doubt, extract nothing. Most turns should yield an empty list.\n\
 Return {\"memories\":[]} when there is nothing genuinely new to store.";
 
+/// A message that is purely a question or greeting yields no memories.
+fn is_query_only(msg: &str) -> bool {
+    let m = msg.trim();
+    if m.is_empty() {
+        return true;
+    }
+    let words = m.split_whitespace().count();
+    // Short messages ending in a question mark are questions, not statements.
+    if m.ends_with('?') && words < 16 {
+        return true;
+    }
+    let lower = m.to_lowercase();
+    const GREETINGS: &[&str] = &["hi", "hello", "hey", "thanks", "thank you", "ok", "okay"];
+    GREETINGS.iter().any(|g| lower == *g)
+}
+
+/// Reject junk facts the model sometimes emits (empty / "unknown" / too short).
+fn is_junk(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    if t.chars().count() < 3 {
+        return true;
+    }
+    matches!(t.as_str(), "unknown" | "n/a" | "na" | "none" | "null" | "the user" | "user")
+}
+
 /// Ask a fast local model to extract durable memories from one turn.
 /// Returns ready-to-store `NewMemory` values (source = Chat).
 pub fn extract_memories(
@@ -95,6 +120,10 @@ pub fn extract_memories(
 ) -> Result<Vec<NewMemory>> {
     // Assistant text is context only; extraction targets the user's new facts.
     let _ = assistant_message;
+    // Cheap guard before spending an LLM call: questions/greetings store nothing.
+    if is_query_only(user_message) {
+        return Ok(Vec::new());
+    }
     let prompt = format!(
         "The user's latest message:\n\"{user_message}\"\n\n\
 Extract only NEW durable facts the user stated. If it is a question or small talk, \
@@ -108,7 +137,8 @@ return {{\"memories\":[]}}."
     let memories = parsed
         .memories
         .into_iter()
-        .filter(|it| !it.text.trim().is_empty())
+        .filter(|it| !is_junk(&it.text))
+        .take(3) // don't over-capture from a single turn
         .map(|it| NewMemory {
             kind: MemoryKind::parse_lenient(&it.kind),
             title: if it.title.trim().is_empty() {
@@ -123,6 +153,7 @@ return {{\"memories\":[]}}."
             tags: it.tags,
             source: MemorySource::Chat,
             sensitivity: Sensitivity::Shareable,
+            parent_id: None,
         })
         .collect();
     Ok(memories)

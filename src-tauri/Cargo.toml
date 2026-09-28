@@ -20,6 +20,7 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4.34"
+base64 = "0.22"
 mint-core = { path = "../crates/mint-core" }
 
 # Release optimization (see https://tauri.app/concept/size/#cargo-configuration).

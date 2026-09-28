@@ -5,8 +5,10 @@
 
 pub mod chat;
 pub mod conversations;
+pub mod documents;
 pub mod embed;
 pub mod engine;
+pub mod graph;
 pub mod ollama;
 pub mod record;
 

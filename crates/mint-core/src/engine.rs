@@ -2,6 +2,7 @@
 //! embedders. All operations are synchronous, in-process, and offline.
 
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
@@ -14,11 +15,18 @@ use qdrant_edge::{
     Vectors, WithPayloadInterface,
 };
 
+use super::documents;
 use super::embed::{Embedders, DENSE_DIM};
+use super::graph::{GraphData, GraphNode, GraphStore};
 use super::record::{
-    Memory, MemoryKind, NewMemory, SearchMode, SearchRequest, SearchResponse, SearchResult, Stats,
-    SyncState,
+    Memory, MemoryKind, MemorySource, NewMemory, SearchMode, SearchRequest, SearchResponse,
+    SearchResult, Sensitivity, Stats, SyncState,
 };
+
+/// Similarity above which two memories get a "related" edge in the graph.
+const RELATED_THRESHOLD: f32 = 0.55;
+/// Max related edges recorded per memory.
+const RELATED_MAX: usize = 4;
 
 const DENSE_NAME: &str = "dense";
 const SPARSE_NAME: &str = "sparse";
@@ -31,6 +39,7 @@ const SCROLL_ALL_LIMIT: usize = 10_000;
 pub struct MemoryEngine {
     shard: EdgeShard,
     embedders: Embedders,
+    graph: Mutex<GraphStore>,
 }
 
 impl MemoryEngine {
@@ -44,8 +53,13 @@ impl MemoryEngine {
 
         let embedders = Embedders::new(&models_dir)?;
         let shard = Self::open_shard(&shard_dir)?;
+        let graph = GraphStore::open(data_dir)?;
 
-        let engine = Self { shard, embedders };
+        let engine = Self {
+            shard,
+            embedders,
+            graph: Mutex::new(graph),
+        };
         engine.ensure_indexes();
         Ok(engine)
     }
@@ -117,12 +131,41 @@ impl MemoryEngine {
             sensitivity: input.sensitivity,
             sync_state: SyncState::LocalOnly,
             version: 1,
+            parent_id: input.parent_id,
         };
         self.upsert(&memory)?;
         self.shard
             .flush()
             .map_err(|e| anyhow!("flush failed: {e}"))?;
+        // Establish semantic relationships (skip chunks: they connect via
+        // part_of and there are too many to link pairwise).
+        if memory.kind != MemoryKind::DocChunk {
+            self.link_related(&memory);
+        }
         Ok(memory)
+    }
+
+    /// Find this memory's nearest neighbours and record "related" edges.
+    fn link_related(&self, memory: &Memory) {
+        let hits = match self.search(SearchRequest {
+            query: memory.text.clone(),
+            mode: SearchMode::Dense,
+            limit: RELATED_MAX + 3,
+            site_id: None,
+            kind: None,
+        }) {
+            Ok(r) => r.results,
+            Err(_) => return,
+        };
+        let tos: Vec<String> = hits
+            .into_iter()
+            .filter(|r| r.memory.id != memory.id && r.score >= RELATED_THRESHOLD)
+            .take(RELATED_MAX)
+            .map(|r| r.memory.id)
+            .collect();
+        if let Ok(mut g) = self.graph.lock() {
+            let _ = g.set_related(&memory.id, &tos);
+        }
     }
 
     /// Add a memory only if no near-duplicate already exists (dense cosine).
@@ -174,7 +217,102 @@ impl MemoryEngine {
         self.shard
             .flush()
             .map_err(|e| anyhow!("flush failed: {e}"))?;
+        if let Ok(mut g) = self.graph.lock() {
+            let _ = g.remove_node(id);
+        }
         Ok(())
+    }
+
+    // ---- documents (Vault) ----------------------------------------------
+
+    /// Parse + chunk + store a document as a Document node with chunk children.
+    /// Returns the document node and the number of chunks stored.
+    pub fn ingest_document(&self, filename: &str, bytes: &[u8]) -> Result<(Memory, usize)> {
+        let text = documents::parse(filename, bytes)?;
+        if text.trim().is_empty() {
+            return Err(anyhow!("no extractable text in '{filename}'"));
+        }
+        let preview: String = text.chars().take(400).collect();
+        let doc = self.add(NewMemory {
+            kind: MemoryKind::Document,
+            title: filename.to_string(),
+            text: preview,
+            site_id: String::new(),
+            asset_id: String::new(),
+            geo: None,
+            tags: Vec::new(),
+            source: MemorySource::File,
+            sensitivity: Sensitivity::Shareable,
+            parent_id: None,
+        })?;
+
+        let chunks = documents::chunk_text(&text);
+        let n = chunks.len();
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let stored = self.add(NewMemory {
+                kind: MemoryKind::DocChunk,
+                title: format!("{filename} [{}]", i + 1),
+                text: chunk,
+                site_id: String::new(),
+                asset_id: String::new(),
+                geo: None,
+                tags: Vec::new(),
+                source: MemorySource::File,
+                sensitivity: Sensitivity::Shareable,
+                parent_id: Some(doc.id.clone()),
+            })?;
+            if let Ok(mut g) = self.graph.lock() {
+                let _ = g.add_part_of(&stored.id, &doc.id);
+            }
+        }
+        Ok((doc, n))
+    }
+
+    pub fn list_documents(&self) -> Result<Vec<Memory>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|m| m.kind == MemoryKind::Document)
+            .collect())
+    }
+
+    /// Delete a document node and all of its chunks.
+    pub fn delete_document(&self, doc_id: &str) -> Result<()> {
+        let children: Vec<String> = self
+            .list()?
+            .into_iter()
+            .filter(|m| m.parent_id.as_deref() == Some(doc_id))
+            .map(|m| m.id)
+            .collect();
+        for c in children {
+            let _ = self.delete(&c);
+        }
+        self.delete(doc_id)
+    }
+
+    // ---- graph -----------------------------------------------------------
+
+    pub fn graph_data(&self) -> Result<GraphData> {
+        let memories = self.list()?;
+        let nodes: Vec<GraphNode> = memories
+            .iter()
+            .map(|m| GraphNode {
+                id: m.id.clone(),
+                label: if m.title.trim().is_empty() {
+                    m.text.chars().take(28).collect()
+                } else {
+                    m.title.clone()
+                },
+                kind: kind_str(&m.kind),
+                parent_id: m.parent_id.clone(),
+            })
+            .collect();
+        let edges = self
+            .graph
+            .lock()
+            .map(|g| g.all().to_vec())
+            .unwrap_or_default();
+        Ok(GraphData { nodes, edges })
     }
 
     // ---- retrieval -------------------------------------------------------

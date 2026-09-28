@@ -5,8 +5,10 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+use base64::Engine as _;
 use mint_core::chat::{extract_memories, format_context, system_prompt};
 use mint_core::conversations::{Conversation, ConversationStore, ConversationSummary};
+use mint_core::graph::GraphData;
 use mint_core::ollama::{ChatMessage, Delta, Ollama};
 use mint_core::record::{
     Memory, MemoryKind, NewMemory, SearchMode, SearchRequest, SearchResponse, Stats,
@@ -74,6 +76,59 @@ pub fn delete_memory(state: State<AppState>, id: String) -> Result<(), String> {
 #[tauri::command]
 pub fn stats(state: State<AppState>) -> Result<Stats, String> {
     lock_engine(&state.engine)?.stats().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn graph_data(state: State<AppState>) -> Result<GraphData, String> {
+    lock_engine(&state.engine)?.graph_data().map_err(|e| e.to_string())
+}
+
+// ---- vault (documents) ---------------------------------------------------
+
+#[derive(Serialize, Clone)]
+pub struct DocIngestResult {
+    pub id: String,
+    pub title: String,
+    pub chunks: usize,
+}
+
+/// Ingest a document from base64-encoded bytes (the UI reads the file locally
+/// and sends its content). Parses, chunks, embeds, and stores it — all offline.
+#[tauri::command]
+pub async fn ingest_document(
+    state: State<'_, AppState>,
+    name: String,
+    data_base64: String,
+) -> Result<DocIngestResult, String> {
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data_base64.as_bytes())
+            .map_err(|e| format!("invalid file data: {e}"))?;
+        let eng = engine.lock().map_err(|_| "engine poisoned".to_string())?;
+        let (doc, chunks) = eng.ingest_document(&name, &bytes).map_err(|e| e.to_string())?;
+        Ok(DocIngestResult {
+            id: doc.id,
+            title: doc.title,
+            chunks,
+        })
+    })
+    .await
+    .map_err(|e| format!("ingest task failed: {e}"))?
+}
+
+#[tauri::command]
+pub fn list_documents(state: State<AppState>) -> Result<Vec<Memory>, String> {
+    lock_engine(&state.engine)?
+        .list_documents()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_document(state: State<AppState>, id: String) -> Result<(), String> {
+    lock_engine(&state.engine)?
+        .delete_document(&id)
+        .map_err(|e| e.to_string())
 }
 
 // ---- chat status ---------------------------------------------------------

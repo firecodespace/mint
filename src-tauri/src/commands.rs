@@ -6,18 +6,29 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use mint_core::chat::{extract_memories, format_context, system_prompt};
+use mint_core::conversations::{Conversation, ConversationStore, ConversationSummary};
 use mint_core::ollama::{ChatMessage, Delta, Ollama};
 use mint_core::record::{
     Memory, MemoryKind, NewMemory, SearchMode, SearchRequest, SearchResponse, Stats,
 };
 use mint_core::MemoryEngine;
 
+/// Similarity above which an auto-captured memory is treated as a duplicate.
+const DEDUP_THRESHOLD: f32 = 0.90;
+
 /// Shared app state. Arc so the chat command can move handles into a blocking task.
 pub struct AppState {
     pub engine: Arc<Mutex<MemoryEngine>>,
+    pub conversations: Arc<Mutex<ConversationStore>>,
     pub ollama: Arc<Ollama>,
     pub chat_model: String,
     pub fast_model: String,
+}
+
+fn lock_convos(
+    store: &Arc<Mutex<ConversationStore>>,
+) -> Result<std::sync::MutexGuard<'_, ConversationStore>, String> {
+    store.lock().map_err(|_| "conversation store poisoned".to_string())
 }
 
 fn lock_engine(
@@ -73,6 +84,56 @@ pub struct ChatStatus {
     pub models: Vec<String>,
     pub chat_model: String,
     pub fast_model: String,
+}
+
+// ---- conversation commands ----------------------------------------------
+
+#[tauri::command]
+pub fn list_conversations(state: State<AppState>) -> Result<Vec<ConversationSummary>, String> {
+    Ok(lock_convos(&state.conversations)?.list())
+}
+
+#[tauri::command]
+pub fn get_conversation(state: State<AppState>, id: String) -> Result<Option<Conversation>, String> {
+    Ok(lock_convos(&state.conversations)?.get(&id))
+}
+
+#[tauri::command]
+pub fn create_conversation(state: State<AppState>) -> Result<Conversation, String> {
+    lock_convos(&state.conversations)?
+        .create(None)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn rename_conversation(
+    state: State<AppState>,
+    id: String,
+    title: String,
+) -> Result<(), String> {
+    lock_convos(&state.conversations)?
+        .rename(&id, title)
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a conversation. When `delete_memories` is true, also removes the
+/// memories captured during it.
+#[tauri::command]
+pub fn delete_conversation(
+    state: State<AppState>,
+    id: String,
+    delete_memories: bool,
+) -> Result<(), String> {
+    let memory_ids = lock_convos(&state.conversations)?
+        .delete(&id)
+        .map_err(|e| e.to_string())?;
+    if delete_memories {
+        let eng = lock_engine(&state.engine)?;
+        for mid in memory_ids {
+            let _ = eng.delete(&mid);
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -143,27 +204,42 @@ fn stage(app: &AppHandle, stage: &str, detail: impl Into<String>) {
 pub async fn chat(
     app: AppHandle,
     state: State<'_, AppState>,
+    conversation_id: String,
     message: String,
     history: Vec<ChatMessage>,
 ) -> Result<ChatTurnResult, String> {
     let engine = state.engine.clone();
+    let conversations = state.conversations.clone();
     let ollama = state.ollama.clone();
     let chat_model = state.chat_model.clone();
     let fast_model = state.fast_model.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        run_turn(app, engine, ollama, chat_model, fast_model, message, history)
+        run_turn(
+            app,
+            engine,
+            conversations,
+            ollama,
+            chat_model,
+            fast_model,
+            conversation_id,
+            message,
+            history,
+        )
     })
     .await
     .map_err(|e| format!("chat task failed: {e}"))?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_turn(
     app: AppHandle,
     engine: Arc<Mutex<MemoryEngine>>,
+    conversations: Arc<Mutex<ConversationStore>>,
     ollama: Arc<Ollama>,
     chat_model: String,
     fast_model: String,
+    conversation_id: String,
     message: String,
     history: Vec<ChatMessage>,
 ) -> Result<ChatTurnResult, String> {
@@ -222,24 +298,35 @@ fn run_turn(
         })
         .map_err(|e| e.to_string())?;
 
-    // 3. Auto-capture durable memories from this turn.
+    // 3. Auto-capture durable memories from this turn (deduped).
     stage(&app, "extracting", "distilling memories");
     let extracted = extract_memories(&ollama, &fast_model, &message, &answer).unwrap_or_default();
     let mut captured = Vec::new();
+    let mut captured_ids = Vec::new();
     if !extracted.is_empty() {
         let eng = lock_engine(&engine)?;
         for nm in extracted {
-            if let Ok(m) = eng.add(nm) {
+            // add_if_novel skips near-duplicates so restated facts don't pile up.
+            if let Ok(Some(m)) = eng.add_if_novel(nm, DEDUP_THRESHOLD) {
                 let item = CapturedItem {
                     id: m.id.clone(),
                     title: m.title.clone(),
                     kind: kind_str(&m.kind),
                 };
                 let _ = app.emit("chat:captured", item.clone());
+                captured_ids.push(m.id.clone());
                 captured.push(item);
             }
         }
     }
+
+    // 4. Persist the turn to the conversation (links captured memory ids).
+    if !conversation_id.is_empty() {
+        if let Ok(mut store) = lock_convos(&conversations) {
+            let _ = store.append_turn(&conversation_id, &message, &answer, &captured_ids);
+        }
+    }
+
     stage(&app, "done", format!("captured {}", captured.len()));
 
     Ok(ChatTurnResult {

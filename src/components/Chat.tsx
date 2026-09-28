@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { chat } from "../api";
+import {
+  chat,
+  createConversation,
+  deleteConversation,
+  getConversation,
+  listConversations,
+} from "../api";
 import type {
   CapturedItem,
   ChatMessage,
   ChatStatus,
+  ConversationSummary,
   RetrievedItem,
   StageEvent,
   TokenEvent,
@@ -39,11 +46,14 @@ export function Chat({
   status: ChatStatus | null;
   onCaptured: () => void;
 }) {
+  const [convos, setConvos] = useState<ConversationSummary[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState<ConversationSummary | null>(null);
 
-  // Live, per-turn cognition state.
+  // Live per-turn cognition state.
   const [thinking, setThinking] = useState("");
   const [answer, setAnswer] = useState("");
   const [flow, setFlow] = useState<FlowEntry[]>([]);
@@ -54,43 +64,116 @@ export function Chat({
   const onCapturedRef = useRef(onCaptured);
   onCapturedRef.current = onCaptured;
 
-  // Wire Tauri streaming events once.
+  async function loadConvos() {
+    try {
+      setConvos(await listConversations());
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   useEffect(() => {
-    const unlisteners: Array<() => void> = [];
+    loadConvos();
+  }, []);
+
+  // Wire Tauri streaming events once. The `disposed` guard makes the async
+  // listen() setup safe under React StrictMode's mount/unmount/remount, so we
+  // never end up with duplicate listeners (which doubled every token).
+  useEffect(() => {
+    let disposed = false;
+    const uns: Array<() => void> = [];
+    const track = (u: () => void) => {
+      if (disposed) u();
+      else uns.push(u);
+    };
     (async () => {
-      unlisteners.push(
+      track(
         await listen<StageEvent>("chat:stage", (e) => {
           const { stage, detail } = e.payload;
-          setFlow((prev) =>
-            [...prev, { id: ++flowSeq, stage, detail }].slice(-40),
-          );
+          setFlow((prev) => [...prev, { id: ++flowSeq, stage, detail }].slice(-40));
         }),
       );
-      unlisteners.push(
+      track(
         await listen<TokenEvent>("chat:token", (e) => {
           const { channel, text } = e.payload;
           if (channel === "thinking") setThinking((t) => t + text);
           else setAnswer((a) => a + text);
         }),
       );
-      unlisteners.push(
+      track(
         await listen<CapturedItem>("chat:captured", (e) => {
           setCaptured((prev) => [...prev, e.payload]);
           onCapturedRef.current();
         }),
       );
     })();
-    return () => unlisteners.forEach((u) => u());
+    return () => {
+      disposed = true;
+      uns.forEach((u) => u());
+    };
   }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [turns, answer, busy]);
 
+  function newChat() {
+    setActiveId(null);
+    setTurns([]);
+    setThinking("");
+    setAnswer("");
+    setFlow([]);
+    setRetrieved([]);
+    setCaptured([]);
+    setInput("");
+  }
+
+  async function openChat(id: string) {
+    try {
+      const c = await getConversation(id);
+      if (!c) return;
+      setActiveId(c.id);
+      setTurns(c.messages.map((m) => ({ role: m.role, content: m.content })));
+      setThinking("");
+      setAnswer("");
+      setFlow([]);
+      setRetrieved([]);
+      setCaptured([]);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function confirmDelete(deleteMemories: boolean) {
+    if (!deleting) return;
+    const id = deleting.id;
+    setDeleting(null);
+    try {
+      await deleteConversation(id, deleteMemories);
+      if (activeId === id) newChat();
+      await loadConvos();
+      if (deleteMemories) onCapturedRef.current();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   async function send(e: React.FormEvent) {
     e.preventDefault();
     const text = input.trim();
     if (!text || busy) return;
+
+    let convoId = activeId;
+    if (!convoId) {
+      try {
+        const c = await createConversation();
+        convoId = c.id;
+        setActiveId(c.id);
+      } catch (err) {
+        console.error(err);
+        return;
+      }
+    }
 
     const history: ChatMessage[] = turns.map((t) => ({ role: t.role, content: t.content }));
     setTurns((prev) => [...prev, { role: "user", content: text }]);
@@ -103,16 +186,14 @@ export function Chat({
     setCaptured([]);
 
     try {
-      const result = await chat(text, history);
+      const result = await chat(convoId, text, history);
       setTurns((prev) => [...prev, { role: "assistant", content: result.answer }]);
       setRetrieved(result.retrieved);
       setCaptured(result.captured);
       setAnswer("");
+      loadConvos();
     } catch (err) {
-      setTurns((prev) => [
-        ...prev,
-        { role: "assistant", content: `Error: ${String(err)}` },
-      ]);
+      setTurns((prev) => [...prev, { role: "assistant", content: `Error: ${String(err)}` }]);
     } finally {
       setBusy(false);
     }
@@ -122,14 +203,47 @@ export function Chat({
 
   return (
     <div className="chat-view">
+      <aside className="chat-sidebar">
+        <button className="new-chat" onClick={newChat}>
+          + New chat
+        </button>
+        <div className="convo-list">
+          {convos.length === 0 && <p className="muted side-empty">No conversations yet.</p>}
+          {convos.map((c) => (
+            <div
+              key={c.id}
+              className={`convo ${activeId === c.id ? "on" : ""}`}
+              onClick={() => openChat(c.id)}
+            >
+              <div className="convo-main">
+                <span className="convo-title">{c.title || "Untitled"}</span>
+                <span className="convo-meta">
+                  {c.message_count} msgs · {c.memory_count} mem
+                </span>
+              </div>
+              <button
+                className="convo-del"
+                title="Delete conversation"
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  setDeleting(c);
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          ))}
+        </div>
+      </aside>
+
       <section className="chat-main">
         <div className="messages" ref={scrollRef}>
           {turns.length === 0 && !busy && (
             <div className="empty-chat">
               <h2>Talk to your local memory</h2>
               <p>
-                Everything you say is answered on-device and distilled into
-                searchable memory. Nothing leaves this machine.
+                Answered on-device and distilled into searchable memory. Nothing leaves
+                this machine.
               </p>
               {offline && (
                 <p className="warn-line">
@@ -185,7 +299,6 @@ export function Chat({
             <p className="muted">The model's live reasoning appears here.</p>
           )}
         </div>
-
         <div className="cog-section">
           <h3>Retrieved memory</h3>
           {retrieved.length === 0 ? (
@@ -202,7 +315,6 @@ export function Chat({
             </ul>
           )}
         </div>
-
         <div className="cog-section">
           <h3>Captured this turn</h3>
           {captured.length === 0 ? (
@@ -223,7 +335,9 @@ export function Chat({
       <footer className="planflow">
         <span className="pf-label">Plan flow</span>
         <div className="pf-track">
-          {flow.length === 0 && <span className="muted">Pipeline stages stream here as the turn runs.</span>}
+          {flow.length === 0 && (
+            <span className="muted">Pipeline stages stream here as the turn runs.</span>
+          )}
           {flow.map((f) => (
             <span key={f.id} className={`pf-step ${f.stage}`}>
               {STAGE_LABEL[f.stage] || f.stage}
@@ -232,6 +346,34 @@ export function Chat({
           ))}
         </div>
       </footer>
+
+      {deleting && (
+        <div className="modal-backdrop" onClick={() => setDeleting(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Delete conversation</h3>
+            <p>
+              Delete <strong>{deleting.title || "Untitled"}</strong>? It has{" "}
+              {deleting.memory_count} linked{" "}
+              {deleting.memory_count === 1 ? "memory" : "memories"}.
+            </p>
+            <div className="modal-actions">
+              <button className="ghost" onClick={() => setDeleting(null)}>
+                Cancel
+              </button>
+              <button className="ghost" onClick={() => confirmDelete(false)}>
+                Delete chat only
+              </button>
+              <button
+                className="ghost danger"
+                onClick={() => confirmDelete(true)}
+                disabled={deleting.memory_count === 0}
+              >
+                Delete chat + memories
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

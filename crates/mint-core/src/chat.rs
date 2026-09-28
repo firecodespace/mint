@@ -71,13 +71,19 @@ struct ExtractionResult {
     memories: Vec<ExtractedItem>,
 }
 
-const EXTRACT_SYSTEM: &str = "You extract durable, reusable memories from a conversation \
-for a personal memory system. Return ONLY JSON of the form \
-{\"memories\":[{\"title\":\"short label\",\"text\":\"the fact worth remembering\",\
-\"kind\":\"note|observation|event|measurement\",\"tags\":[\"...\"]}]}. \
-Include only information worth remembering long-term: facts about the user, decisions, \
-preferences, entities, commitments, deadlines. Ignore small talk, questions, and \
-transient chatter. If nothing is worth saving, return {\"memories\":[]}.";
+const EXTRACT_SYSTEM: &str = "You extract durable memories from ONLY the user's latest \
+message, for a personal memory system. Return ONLY JSON: \
+{\"memories\":[{\"title\":\"short label\",\"text\":\"the fact\",\
+\"kind\":\"note|observation|event|measurement\",\"tags\":[\"...\"]}]}.\n\
+STRICT RULES:\n\
+- Extract only NEW facts the USER explicitly stated in their message (their name, \
+preferences, decisions, plans, commitments, deadlines, facts about their world).\n\
+- If the user's message is a QUESTION, a request, a greeting, or small talk, extract \
+NOTHING.\n\
+- Never extract the assistant's words. Never restate or duplicate something the user \
+is merely asking about.\n\
+- When in doubt, extract nothing. Most turns should yield an empty list.\n\
+Return {\"memories\":[]} when there is nothing genuinely new to store.";
 
 /// Ask a fast local model to extract durable memories from one turn.
 /// Returns ready-to-store `NewMemory` values (source = Chat).
@@ -87,9 +93,12 @@ pub fn extract_memories(
     user_message: &str,
     assistant_message: &str,
 ) -> Result<Vec<NewMemory>> {
+    // Assistant text is context only; extraction targets the user's new facts.
+    let _ = assistant_message;
     let prompt = format!(
-        "Conversation turn:\nUser: {user_message}\nAssistant: {assistant_message}\n\n\
-Extract the durable memories as JSON."
+        "The user's latest message:\n\"{user_message}\"\n\n\
+Extract only NEW durable facts the user stated. If it is a question or small talk, \
+return {{\"memories\":[]}}."
     );
     let raw = ollama.generate(model, Some(EXTRACT_SYSTEM), &prompt, true)?;
     let parsed: ExtractionResult = serde_json::from_str(&raw).unwrap_or(ExtractionResult {

@@ -6,7 +6,7 @@ use tauri::Manager;
 
 use commands::AppState;
 use mint_core::ollama::{Ollama, DEFAULT_CHAT_MODEL, DEFAULT_FAST_MODEL};
-use mint_core::MemoryEngine;
+use mint_core::{ConversationStore, MemoryEngine};
 
 /// Pick a model: env override -> preferred if pulled -> first available -> default.
 fn choose_model(env_key: &str, preferred: &str, available: &[String]) -> String {
@@ -39,6 +39,7 @@ pub fn run() {
             log::info!("Mint data dir: {}", data_dir.display());
 
             let engine = MemoryEngine::open(&data_dir).map_err(|e| e.to_string())?;
+            let conversations = ConversationStore::open(&data_dir).map_err(|e| e.to_string())?;
 
             let ollama = Ollama::new();
             let available = ollama.list_models().unwrap_or_default();
@@ -48,6 +49,7 @@ pub fn run() {
 
             app.manage(AppState {
                 engine: Arc::new(Mutex::new(engine)),
+                conversations: Arc::new(Mutex::new(conversations)),
                 ollama: Arc::new(ollama),
                 chat_model,
                 fast_model,
@@ -62,6 +64,11 @@ pub fn run() {
             commands::stats,
             commands::chat_status,
             commands::chat,
+            commands::list_conversations,
+            commands::get_conversation,
+            commands::create_conversation,
+            commands::rename_conversation,
+            commands::delete_conversation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

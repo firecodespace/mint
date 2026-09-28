@@ -125,6 +125,25 @@ impl MemoryEngine {
         Ok(memory)
     }
 
+    /// Add a memory only if no near-duplicate already exists (dense cosine).
+    /// Returns `None` when a memory with similarity >= `threshold` is present.
+    /// Used for auto-capture so restated facts do not pile up.
+    pub fn add_if_novel(&self, input: NewMemory, threshold: f32) -> Result<Option<Memory>> {
+        let hits = self.search(SearchRequest {
+            query: input.text.clone(),
+            mode: SearchMode::Dense,
+            limit: 1,
+            site_id: None,
+            kind: None,
+        })?;
+        if let Some(top) = hits.results.first() {
+            if top.score >= threshold {
+                return Ok(None);
+            }
+        }
+        Ok(Some(self.add(input)?))
+    }
+
     /// Insert or update a memory by its stable id (idempotent upsert).
     pub fn upsert(&self, mem: &Memory) -> Result<()> {
         let (dense, sparse) = self.embedders.embed_document(&mem.text)?;

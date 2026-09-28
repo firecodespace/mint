@@ -4,6 +4,8 @@ import type {
   ChatMessage,
   ChatStatus,
   ChatTurnResult,
+  Conversation,
+  ConversationSummary,
   Memory,
   NewMemory,
   SearchRequest,
@@ -38,8 +40,31 @@ export function chatStatus(): Promise<ChatStatus> {
 /** Run one chat turn. Streaming deltas arrive via Tauri events
  * (chat:stage, chat:token, chat:captured); this resolves with the final turn. */
 export function chat(
+  conversationId: string,
   message: string,
   history: ChatMessage[],
 ): Promise<ChatTurnResult> {
-  return invoke<ChatTurnResult>("chat", { message, history });
+  return invoke<ChatTurnResult>("chat", { conversationId, message, history });
+}
+
+// ---- conversations -------------------------------------------------------
+
+export function listConversations(): Promise<ConversationSummary[]> {
+  return invoke<ConversationSummary[]>("list_conversations");
+}
+
+export function getConversation(id: string): Promise<Conversation | null> {
+  return invoke<Conversation | null>("get_conversation", { id });
+}
+
+export function createConversation(): Promise<Conversation> {
+  return invoke<Conversation>("create_conversation");
+}
+
+export function renameConversation(id: string, title: string): Promise<void> {
+  return invoke<void>("rename_conversation", { id, title });
+}
+
+export function deleteConversation(id: string, deleteMemories: boolean): Promise<void> {
+  return invoke<void>("delete_conversation", { id, deleteMemories });
 }

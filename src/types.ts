@@ -119,3 +119,28 @@ export interface TokenEvent {
   channel: "thinking" | "answer";
   text: string;
 }
+
+// ---- conversations -------------------------------------------------------
+
+export interface StoredMessage {
+  role: "user" | "assistant";
+  content: string;
+  ts: string;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages: StoredMessage[];
+  memory_ids: string[];
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  updated_at: string;
+  message_count: number;
+  memory_count: number;
+}

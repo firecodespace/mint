@@ -1,0 +1,19 @@
+[package]
+name = "mint-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Xarch Labs"]
+description = "Mint cognitive memory engine: Qdrant Edge + fastembed, local-first."
+
+[lib]
+name = "mint_core"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1.0.104"
+log = "0.4.34"
+qdrant-edge = "0.8.0"
+fastembed = "7.1.0"
+ulid = "3.0.0"
+chrono = "0.4.45"

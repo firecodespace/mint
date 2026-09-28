@@ -3768,6 +3768,19 @@ dependencies = [
 name = "mint"
 version = "0.1.0"
 dependencies = [
+ "log",
+ "mint-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+]
+
+[[package]]
+name = "mint-core"
+version = "0.1.0"
+dependencies = [
  "anyhow",
  "chrono",
  "fastembed",
@@ -3775,9 +3788,6 @@ dependencies = [
  "qdrant-edge",
  "serde",
  "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
  "ulid",
 ]
 

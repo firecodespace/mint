@@ -1,12 +1,11 @@
 mod commands;
-mod memory;
 
 use std::sync::Mutex;
 
 use tauri::Manager;
 
 use commands::AppState;
-use memory::MemoryEngine;
+use mint_core::MemoryEngine;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

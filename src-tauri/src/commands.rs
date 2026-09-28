@@ -4,8 +4,8 @@ use std::sync::Mutex;
 
 use tauri::State;
 
-use crate::memory::record::{Memory, NewMemory, SearchRequest, SearchResponse, Stats};
-use crate::memory::MemoryEngine;
+use mint_core::record::{Memory, NewMemory, SearchRequest, SearchResponse, Stats};
+use mint_core::MemoryEngine;
 
 /// App state: the memory engine behind a Mutex (embedding needs &mut internally,
 /// and Phase 1 favors simplicity over read parallelism).

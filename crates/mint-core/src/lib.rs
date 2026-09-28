@@ -1,0 +1,10 @@
+//! mint-core: the local-first cognitive memory engine.
+//!
+//! Embeds Qdrant Edge (vector store) + fastembed (embeddings), fully offline.
+//! Hosted by the Tauri app today; by a headless daemon and other clients later.
+
+pub mod embed;
+pub mod engine;
+pub mod record;
+
+pub use engine::MemoryEngine;

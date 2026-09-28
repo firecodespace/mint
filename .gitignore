@@ -13,6 +13,9 @@ target/
 .fastembed_cache/
 models/
 
+# Native pdfium library (downloaded separately; see README)
+lib/
+
 # Qdrant Edge on-disk data (local memory store)
 data/
 .mint-data/

@@ -1,7 +1,7 @@
 //! The on-device memory engine: an embedded Qdrant Edge shard plus local
 //! embedders. All operations are synchronous, in-process, and offline.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
@@ -85,7 +85,7 @@ impl MemoryEngine {
     fn create_index(&self, field: &str, schema: PayloadSchemaType) {
         let op = UpdateOperation::FieldIndexOperation(FieldIndexOperations::CreateIndex(
             CreateIndex {
-                field_name: JsonPath::new(field),
+                field_name: jpath(field),
                 field_schema: Some(PayloadFieldSchema::FieldType(schema)),
             },
         ));
@@ -99,7 +99,7 @@ impl MemoryEngine {
     /// Create a new memory from user/agent input, embed and store it.
     pub fn add(&self, input: NewMemory) -> Result<Memory> {
         let now = chrono::Utc::now().to_rfc3339();
-        let id = ulid::Ulid::new().to_string();
+        let id = ulid::Ulid::generate().to_string();
         let memory = Memory {
             id,
             kind: input.kind,
@@ -252,6 +252,11 @@ impl MemoryEngine {
 
 // ---- helpers -------------------------------------------------------------
 
+/// Build a JsonPath for a payload field (our field names are simple identifiers).
+fn jpath(field: &str) -> JsonPath {
+    field.parse().expect("valid payload field path")
+}
+
 /// Deterministic Qdrant point id from a ULID string (UUID over the 16 ULID bytes).
 fn point_id(ulid_str: &str) -> Result<PointId> {
     let ulid = ulid::Ulid::from_string(ulid_str).context("invalid ULID")?;
@@ -271,14 +276,14 @@ fn build_filter(site_id: Option<&str>, kind: Option<&MemoryKind>) -> Option<Filt
     if let Some(s) = site_id {
         if !s.is_empty() {
             must.push(Condition::Field(FieldCondition::new_match(
-                JsonPath::new("site_id"),
+                jpath("site_id"),
                 Match::from(s.to_string()),
             )));
         }
     }
     if let Some(k) = kind {
         must.push(Condition::Field(FieldCondition::new_match(
-            JsonPath::new("kind"),
+            jpath("kind"),
             Match::from(kind_str(k)),
         )));
     }

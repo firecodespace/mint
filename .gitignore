@@ -15,6 +15,7 @@ models/
 
 # Qdrant Edge on-disk data (local memory store)
 data/
+.mint-data/
 *.qdrant/
 
 # Env / secrets

@@ -1,185 +1,161 @@
-# Mint — Edge Memory for Field Agents
+# Mint — AI-Powered Edge Memory & Intelligence Platform
 
-> An offline-first desktop app where a disconnected field agent captures observations,
-> searches them instantly with **zero network** via embedded **Qdrant Edge**, and
-> intelligently syncs curated knowledge to a shared cloud brain (**Qdrant Server**)
-> when connectivity returns.
+> A local-first, offline-capable AI platform that remembers. Everything you tell it,
+> write, commit, or drop in becomes searchable semantic memory on-device; a local LLM
+> (Ollama) reasons over that memory, keeps it organized, and syncs intelligently to a
+> cloud brain when connected.
+>
+> Powered by **Qdrant Edge** (embedded vector search) + **fastembed** (local embeddings)
+> + **Ollama** (local reasoning), inside a **Tauri** desktop app, with a **`mint-core`**
+> engine exposed over a **localhost API** so other surfaces (CLI, git hooks, IDE plugin)
+> are all clients.
 
-Built as the edge-native successor to **HCMA** (Hierarchical Cognitive Memory Architecture).
-
----
-
-## 1. Problem & Goal
-
-AI at the edge must search and reason over locally generated information without a
-constant cloud dependency: robots, kiosks, vehicles, mobile and field devices operate
-where connectivity is intermittent, latency matters, and sensitive data cannot always
-leave the device.
-
-**Goal:** an offline-first AI application, powered by Qdrant Edge, that can:
-
-1. Maintain searchable semantic memory directly on the device.
-2. Perform low-latency vector + hybrid search with no network access.
-3. Operate fully offline and survive intermittent connectivity.
-4. Dynamically decide what stays local vs. what is synchronized.
-5. Synchronize with Qdrant Server when connectivity returns.
-6. Handle evolving memory, updates, and conflicting information.
-7. Provide a UI to inspect device memory, search results, sync status, and activity.
-
-**Expected outcome:** a complete edge-native AI product that can *remember, retrieve,
-operate offline, and sync intelligently when connected* — not merely a local vector DB.
+Edge-native successor to **HCMA** — the cognitive-memory idea, actually built.
 
 ---
 
-## 2. What we carry over from HCMA (and what we drop)
+## 0. Product decisions (locked 2026-09-29)
 
-| HCMA (cloud-heavy) | Mint (edge-native) |
-|---|---|
-| Qdrant **Server** (`:6333`) as primary store | Qdrant **Edge** — embedded in-process in the Tauri Rust core, offline |
-| Python FastAPI service for embeddings | **fastembed** (Rust, ONNX) in-process — dense + sparse, no network |
-| Neo4j graph + Redis cache | Dropped. Flat memory records + payload filters (graph edges optional later) |
-| Ollama `scoreSummaries` (70% LLM / 20% recency / 10% length) | **Salience/sync brain** reuses the same weighted-scorer shape |
-| Stable `ctx_${nodeId}_${userId}` IDs + Cypher `MERGE` | Stable ULIDs + idempotent upsert (survives conflict / replay) |
-| Gemini for final answer | Local **Ollama** answer/summary — Phase 3, optional, offline |
-
-The transferable HCMA insight: **the LLM is one signal among cheap heuristics in a
-weighted scorer**, not the whole decision. In HCMA that decided which understanding
-summary "won". In Mint it decides **how salient a memory is and whether it should be
-promoted to the cloud**.
+- **Qdrant Edge challenge stays in scope.** Edge<->cloud sync + conflict resolution +
+  a sync-status UI remain required deliverables (Phase 5). The cloud is reframed as
+  backup / cross-device sharing of *consolidated* memory, which also serves the product.
+- **`mint-core` extraction happens now** (start of Phase 2): the engine becomes a
+  library hosted by a local service that exposes a **localhost-only API**. The Tauri app
+  is a client; the CLI, git hooks, and VS Code plugin are clients too. Everything stays
+  offline (localhost).
+- **Phase 2 leads with the general chat-memory assistant** — a local chatbot that
+  remembers everything you tell it and shows its work. Developer tooling is Phase 4.
+- **No emoji / pictographs anywhere in the codebase.** Text labels and inline SVG only.
 
 ---
 
-## 3. Target platform & stack
+## 1. The unifying idea: one event bus, one cognitive core
 
-- **App shell:** Tauri 2 (Rust core + web UI). One binary, in-process vector engine,
-  genuinely offline. Target: Windows desktop (dev machine), portable to other OSes.
-- **Vector engine:** `qdrant-edge` 0.8, embedded in the Rust core.
-- **Embeddings:** `fastembed` 7.x (Rust) — dense (`bge-small-en-v1.5`, 384d) + sparse
-  (SPLADE / BM25) for true hybrid search. Model cached on disk after first download →
-  offline thereafter.
-- **Frontend:** React 19 + Vite + TypeScript, talking to the Rust core via Tauri commands.
-- **Cloud sync target (Phase 2):** Qdrant Server (Docker locally, or Qdrant Cloud).
-- **Local LLM (Phase 3):** Ollama (already installed: v0.15.5).
-
-### Why Tauri over Electron / Python
-Qdrant Edge is a Rust crate that embeds **in-process**. Tauri's Rust core hosts it
-directly — no sidecar server, no separate process — which is the honest "edge" story.
-
----
-
-## 4. Data model — the Memory record
-
-The on-device unit of memory.
+Every input — chat turns, dropped docs/images, git commits/PRs, `#mem` code comments,
+`mint add` from the CLI, "I have a deadline Friday" — is the same primitive: a
+**MemoryEvent** entering a pipeline. Build one cognitive core; everything else is an
+**ingestion adapter** or a **surface**.
 
 ```
-Memory {
-  id: ULID                       # stable, idempotent upsert key
-  kind: observation | note | doc_chunk | measurement | event
-  title: string
-  text: string                   # the content that gets embedded
-
-  # field-agent structured fields (payload-indexed for fast filtering)
-  site_id: string
-  asset_id: string
-  geo: { lat: f64, lng: f64 } | null
-  tags: string[]
-  source: manual | file | sensor
-
-  captured_at: timestamp         # when the observation happened
-  created_at: timestamp
-  updated_at: timestamp
-
-  # engine-managed
-  salience: f32                  # Phase 2 (heuristic) -> Phase 3 (Ollama-blended)
-  sensitivity: local_only | shareable
-  sync_state: local_only | pending | synced | conflict
-  version: u64                   # for conflict resolution
-}
+  INGESTION ADAPTERS            COGNITIVE CORE (mint-core, 100% local)          SURFACES
+  ─────────────────            ────────────────────────────────────           ────────
+  chat turns          ┐        1. normalize   -> MemoryEvent                   Chat console
+  dropped docs/images ├──────► 2. extract     (Ollama: entities/tasks/dates)   + Cognition panel
+  git hooks (commit/PR)│       3. embed        (fastembed dense + BM25 sparse)  + Plan-flow timeline
+  #mem comments / .mint│       4. route/salience (store? merge? discard? secret)Dev dashboard
+  CLI `mint add`      ┘        5. store/update (Qdrant Edge, layered)           VS Code plugin
+                              6. consolidate   (Ollama: summarize/dedup/decay)  (all CLIENTS of
+                              7. propose action (task/date -> confirm)           the localhost API)
+                                 ▲
+                              retrieval (hybrid + temporal/graph) feeds chat + dashboards
 ```
 
-Stable ULID + idempotent upsert = the HCMA "stable ID / MERGE" property: re-ingesting
-or replaying a sync never duplicates a memory.
+Ollama is the reasoning organ used at steps 2, 6, 7, and generation — that is what makes
+this *cognitive*, not a vector DB with a chat skin.
 
 ---
 
-## 5. Qdrant Edge collection design
-
-- **Named vectors:** `dense` (cosine) + `sparse` → hybrid retrieval.
-- **Payload indexes:** `kind`, `tags`, `site_id`, `asset_id`, `captured_at`, `sync_state`
-  → fast filtered search ("leaks at Site A last week").
-- **Persistence:** shard persisted to disk (app data dir) so memory survives restart.
-
----
-
-## 6. Retrieval flow (Phase 1 core)
+## 2. Architecture (target)
 
 ```
-query text
-  -> fastembed: dense embedding + sparse embedding   (in-process, no network)
-  -> Qdrant Edge query:
-       prefetch dense (topK) + prefetch sparse (topK)
-       fuse with RRF (Reciprocal Rank Fusion)
-       apply payload filters (site/date/kind/tags)
-  -> results + payload + score
-  -> UI shows results AND measured latency (proves low-latency, no network)
+mint/
+├── crates/
+│   ├── mint-core/     Rust lib: memory, embed, ollama client, pipeline, retrieval, sync
+│   └── mint-daemon/   (optional later) headless host of mint-core + localhost API
+├── src-tauri/         Tauri app: hosts mint-core, serves the UI, exposes localhost API
+├── src/               React UI: chat + cognition panel + plan-flow + dev dashboard
+├── cli/               `mint` CLI (Phase 4): git hooks, `mint add`, capture
+└── vscode/            VS Code extension (Phase 4): client of the localhost API
 ```
 
-### Ingestion
-- **Note / observation:** embed text → upsert directly.
-- **Dropped document (PDF/txt):** recursive text-splitting in Rust (no LLM yet) →
-  embed each chunk → upsert as `doc_chunk`. Semantic chunking via Ollama is Phase 3.
+- **Localhost API**: an `axum` server inside the app (or daemon) bound to `127.0.0.1`,
+  offline only. Endpoints for capture, search, chat (SSE stream), tasks, sync status.
+- **Same core, many clients**: UI, CLI, git hooks, IDE plugin all speak to the API.
 
 ---
 
-## 7. The sync brain (Phase 2 — the differentiator)
+## 3. Cognitive memory model
 
-- **Connectivity detector** + in-app **"airplane mode" toggle** for live demos.
-- **Outbox / op-log:** every write made offline is journaled locally.
-- **Salience scoring (heuristics first):** access frequency, freshness, confidence,
-  kind. `sensitivity = local_only` gate → private/device-specific memories never sync.
-- **Sync policy:** on reconnect → drain outbox up to Qdrant Server, pull cloud updates
-  down, keyed by stable ULID.
-- **Conflict resolution:** same ULID edited on device + cloud → compare `version` →
-  Last-Write-Wins or merge → surfaced in the UI.
+Reviving HCMA's layered memory — built for real this time:
 
----
+- **Episodic** — raw events (a chat turn, a commit, a captured note). High volume.
+- **Semantic** — consolidated facts / understanding, distilled from episodics by Ollama.
+- **Procedural** — how-tos / recurring patterns (later).
 
-## 8. Local reasoning (Phase 3 — last)
+A **consolidation pass** (Ollama, on-demand/background) merges episodic -> semantic,
+updates existing memories (the HCMA "understanding score" idea), dedups, and decays stale
+low-salience memories. This is the "auto-update / better organization" goal.
 
-- **Ollama as the salience judge** — the HCMA `scoreSummaries` pattern.
-- **Offline Q&A** over retrieved memories (RAG, fully local).
-- **Semantic chunking** upgrade for document ingestion.
+Each memory keeps the Phase-1 fields plus: `layer`, `salience`, `sensitivity`,
+`sync_state`, `version`, and links (source event, related memories, backlinks to file:line
+or a chat turn).
 
----
-
-## 9. UI surfaces
-
-1. **Memory browser** — list/inspect on-device memories, filter by site/kind/tags.
-2. **Search playground** — query box, dense/sparse/hybrid toggle, filters, results with
-   **visible latency**.
-3. **Sync dashboard** — online/offline toggle, outbox depth, last sync, conflicts. (P2)
-4. **Activity log** — a stream of system events (ingest, search, sync, conflict).
+### Secrets are special (security)
+Never embed secret values. Store secret **metadata** semantically (name, service,
+purpose, where-used, rotation date) for retrieval; keep the **value** in the OS credential
+vault (Windows DPAPI / Credential Manager) and store only a reference. Search finds the
+metadata; the value never lands in the vector store or an embedding.
 
 ---
 
-## 10. Phased roadmap
+## 4. Surfaces & UI (no emoji)
 
-### Phase 1 — Retrieval engine (PRIORITY)
-- [x] Tauri + React/Vite scaffold.
-- [ ] `Memory` record type (Rust + shared TS types).
-- [ ] Qdrant Edge shard: named dense+sparse vectors, payload indexes, disk persist.
-- [ ] fastembed dense + sparse embedding module.
-- [ ] Ingest: add note; drop a document -> chunk -> embed -> upsert.
-- [ ] Hybrid search (RRF) + payload filters, Tauri command.
-- [ ] UI: memory browser + search playground with latency readout.
-- [ ] Durability: restart app, memory persists.
-
-### Phase 2 — Sync brain
-### Phase 3 — Local Ollama reasoning
+Three-zone cognition layout:
+- **Center** — chat.
+- **Right rail "Cognition"** — streams Ollama's live reasoning for the current turn.
+- **Bottom "Plan flow"** — real-time timeline of pipeline stages firing
+  (`extracting -> embedding -> routing -> stored #id`, `proposed task`,
+  `consolidated 3 memories`) so the user watches it think and save, locally.
+- **Separate route "Developer dashboard"** — git worklog, recent captures, secrets
+  metadata, open tasks. Purpose-built, uncluttered. (Phase 4.)
 
 ---
 
-## 11. Status log
-- 2026-09-28: Toolchain ready (Node 22, Rust 1.98.1 msvc, MSVC, WebView2, Ollama 0.15.5).
-  Tauri 2 + React-TS scaffolded. Deps added: qdrant-edge 0.8, fastembed 7.1, ulid,
-  chrono, anyhow. Building Phase 1 retrieval core.
+## 5. Developer capture strategy (Phase 4)
+
+Explicit + git, never a file-save firehose (noise wrecks retrieval):
+- **git hooks** (`post-commit`, `pre-push`, PR via `gh`) -> auto worklog memory
+  (what changed, why, files/branch, Ollama summary).
+- **`#mem` / `#todo` inline comment tags** -> ingested with `file:line` backlink.
+- **`.mint` scratch file** watched for new lines.
+- **CLI `mint add "..."`** and IDE "capture selection".
+Salience routing keeps the store signal-rich.
+
+---
+
+## 6. Stack
+
+- Tauri 2 (Rust core + React/Vite/TS UI).
+- Qdrant Edge 0.8 (embedded, dense + sparse hybrid, on-disk).
+- fastembed 7 (all-MiniLM-L6-v2, 384d; offline after first run).
+- Ollama (local LLM: chat, extraction, consolidation, proposals; multimodal for images).
+- axum for the localhost API.
+- Cloud sync target (Phase 5): Qdrant Server (Docker / Qdrant Cloud).
+
+---
+
+## 7. Roadmap
+
+- **Phase 1 — Retrieval engine.** DONE. Offline hybrid search (dense + sparse + RRF),
+  payload filters, disk persistence, capture/search/browse UI, activity log.
+- **Phase 2 — Cognitive core + Chat + Ollama.** Extract `mint-core` + localhost API;
+  Ollama streaming chat with RAG over memory; auto-capture memories from conversation
+  (extract -> embed -> route -> store); new 3-zone UI; purge all emoji.
+- **Phase 3 — Intelligence.** Layered memory (episodic/semantic/procedural),
+  consolidation / auto-update / dedup / decay, salience routing, multimodal ingest
+  (docs + images via local captioning), proactive task/date extraction -> local
+  tasks/calendar with confirm.
+- **Phase 4 — Developer platform.** `mint` CLI + git hooks, `#mem` / `.mint` capture,
+  VS Code extension, developer dashboard.
+- **Phase 5 — Edge<->cloud sync brain.** Qdrant Server sync + conflict resolution +
+  sync-status UI (challenge deliverable; also cross-device memory). Connectivity
+  detector + airplane-mode toggle + outbox + sensitivity gate.
+
+---
+
+## 8. Status log
+- 2026-09-28: Toolchain + Tauri 2 scaffold. Phase 1 retrieval engine built and working
+  (Qdrant Edge + fastembed hybrid search, on-disk persistence). Data dir relocated to
+  project-local `D:\mint\.mint-data` via `MINT_DATA_DIR`.
+- 2026-09-29: Platform vision locked (see section 0). Next: Phase 2 — start with the
+  `mint-core` refactor + localhost API, then Ollama chat with live memory capture.

@@ -17,8 +17,18 @@ fn ext_of(name: &str) -> String {
 pub fn parse(filename: &str, bytes: &[u8]) -> Result<String> {
     let ext = ext_of(filename);
     if ext == "pdf" {
-        return pdf_extract::extract_text_from_mem(bytes)
-            .map_err(|e| anyhow!("failed to parse PDF: {e}"));
+        // pdf-extract can panic on PDFs with unusual encodings; catch it so a
+        // difficult file yields a clean error rather than unwinding the task.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pdf_extract::extract_text_from_mem(bytes)
+        }));
+        return match result {
+            Ok(Ok(text)) => Ok(text),
+            Ok(Err(e)) => Err(anyhow!("failed to parse PDF: {e}")),
+            Err(_) => Err(anyhow!(
+                "this PDF uses an encoding the local parser can't read; try exporting it to text"
+            )),
+        };
     }
     if TEXT_EXTS.contains(&ext.as_str()) || ext.is_empty() {
         return Ok(String::from_utf8_lossy(bytes).to_string());

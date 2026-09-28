@@ -1,0 +1,30 @@
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+
+# Rust / Tauri
+src-tauri/target/
+target/
+
+# fastembed model cache (downloaded on first run)
+.fastembed_cache/
+models/
+
+# Qdrant Edge on-disk data (local memory store)
+data/
+*.qdrant/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

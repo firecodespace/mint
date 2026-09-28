@@ -74,6 +74,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
   const nodesRef = useRef<Node[]>(nodes);
   nodesRef.current = nodes;
   const [, setTick] = useState(0);
+  const [runId, setRunId] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const dragId = useRef<string | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -121,7 +122,8 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
         b.vx -= dx * diff;
         b.vy -= dy * diff;
       }
-      // centering + integrate
+      // centering + integrate; track kinetic energy so we can stop when settled.
+      let energy = 0;
       for (const n of ns) {
         if (n.pinned) {
           n.vx = 0;
@@ -134,14 +136,18 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
         n.vy *= DAMP;
         n.x += n.vx;
         n.y += n.vy;
+        energy += n.vx * n.vx + n.vy * n.vy;
       }
       setTick((t) => (t + 1) % 1000000);
       frames++;
-      if (frames < 600) raf = requestAnimationFrame(step);
+      // Stop once the layout settles (or after a hard cap) so it stops
+      // re-rendering and consuming CPU.
+      const settled = frames > 40 && energy < 0.4;
+      if (frames < 400 && !settled) raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [edges]);
+  }, [edges, runId]);
 
   function toSvg(clientX: number, clientY: number) {
     const svg = svgRef.current;
@@ -216,6 +222,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
                 e.preventDefault();
                 dragId.current = n.id;
                 setSelected(n.id);
+                setRunId((r) => r + 1); // wake the (possibly settled) sim
               }}
             >
               <circle r={selected === n.id ? 9 : 6} />

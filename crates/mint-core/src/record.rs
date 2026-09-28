@@ -12,6 +12,8 @@ pub enum MemoryKind {
     DocChunk,
     Measurement,
     Event,
+    /// Root node of an ingested document (its chunks link to it via parent_id).
+    Document,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -84,6 +86,10 @@ pub struct Memory {
     pub sensitivity: Sensitivity,
     pub sync_state: SyncState,
     pub version: u64,
+
+    /// For document chunks: the id of their parent Document node.
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 /// Input for creating a memory. The engine fills id / timestamps / the
@@ -103,6 +109,8 @@ pub struct NewMemory {
     pub tags: Vec<String>,
     pub source: MemorySource,
     pub sensitivity: Sensitivity,
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]

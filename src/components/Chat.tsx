@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   chat,
@@ -39,6 +39,45 @@ const STAGE_LABEL: Record<string, string> = {
 
 let flowSeq = 0;
 
+// Isolated composer: keeps its own input state so keystrokes re-render ONLY the
+// textarea, not the message list / sidebar / cognition panel.
+const Composer = memo(function Composer({
+  busy,
+  onSend,
+}: {
+  busy: boolean;
+  onSend: (text: string) => void;
+}) {
+  const [text, setText] = useState("");
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const t = text.trim();
+    if (!t || busy) return;
+    onSend(t);
+    setText("");
+  }
+  return (
+    <form className="composer" onSubmit={submit}>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            submit(e);
+          }
+        }}
+        placeholder="Message Mint…  (Enter to send, Shift+Enter for newline)"
+        rows={2}
+        disabled={busy}
+      />
+      <button className="primary" type="submit" disabled={busy}>
+        {busy ? "…" : "Send"}
+      </button>
+    </form>
+  );
+});
+
 export function Chat({
   status,
   onCaptured,
@@ -49,7 +88,6 @@ export function Chat({
   const [convos, setConvos] = useState<ConversationSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState<ConversationSummary | null>(null);
 
@@ -63,6 +101,12 @@ export function Chat({
   const scrollRef = useRef<HTMLDivElement>(null);
   const onCapturedRef = useRef(onCaptured);
   onCapturedRef.current = onCaptured;
+  const activeIdRef = useRef<string | null>(null);
+  activeIdRef.current = activeId;
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+  const turnsRef = useRef<Turn[]>([]);
+  turnsRef.current = turns;
 
   async function loadConvos() {
     try {
@@ -76,9 +120,8 @@ export function Chat({
     loadConvos();
   }, []);
 
-  // Wire Tauri streaming events once. The `disposed` guard makes the async
-  // listen() setup safe under React StrictMode's mount/unmount/remount, so we
-  // never end up with duplicate listeners (which doubled every token).
+  // Wire Tauri streaming events once. The `disposed` guard keeps async listen()
+  // setup safe (no duplicate listeners, which had doubled every token).
   useEffect(() => {
     let disposed = false;
     const uns: Array<() => void> = [];
@@ -114,18 +157,21 @@ export function Chat({
   }, []);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [turns, answer, busy]);
 
-  function newChat() {
-    setActiveId(null);
-    setTurns([]);
+  function resetCognition() {
     setThinking("");
     setAnswer("");
     setFlow([]);
     setRetrieved([]);
     setCaptured([]);
-    setInput("");
+  }
+
+  function newChat() {
+    setActiveId(null);
+    setTurns([]);
+    resetCognition();
   }
 
   async function openChat(id: string) {
@@ -134,11 +180,7 @@ export function Chat({
       if (!c) return;
       setActiveId(c.id);
       setTurns(c.messages.map((m) => ({ role: m.role, content: m.content })));
-      setThinking("");
-      setAnswer("");
-      setFlow([]);
-      setRetrieved([]);
-      setCaptured([]);
+      resetCognition();
     } catch (e) {
       console.error(e);
     }
@@ -150,7 +192,7 @@ export function Chat({
     setDeleting(null);
     try {
       await deleteConversation(id, deleteMemories);
-      if (activeId === id) newChat();
+      if (activeIdRef.current === id) newChat();
       await loadConvos();
       if (deleteMemories) onCapturedRef.current();
     } catch (e) {
@@ -158,12 +200,10 @@ export function Chat({
     }
   }
 
-  async function send(e: React.FormEvent) {
-    e.preventDefault();
-    const text = input.trim();
-    if (!text || busy) return;
+  async function send(text: string) {
+    if (busyRef.current) return;
 
-    let convoId = activeId;
+    let convoId = activeIdRef.current;
     if (!convoId) {
       try {
         const c = await createConversation();
@@ -175,15 +215,13 @@ export function Chat({
       }
     }
 
-    const history: ChatMessage[] = turns.map((t) => ({ role: t.role, content: t.content }));
+    const history: ChatMessage[] = turnsRef.current.map((t) => ({
+      role: t.role,
+      content: t.content,
+    }));
     setTurns((prev) => [...prev, { role: "user", content: text }]);
-    setInput("");
     setBusy(true);
-    setThinking("");
-    setAnswer("");
-    setFlow([]);
-    setRetrieved([]);
-    setCaptured([]);
+    resetCognition();
 
     try {
       const result = await chat(convoId, text, history);
@@ -270,24 +308,7 @@ export function Chat({
           )}
         </div>
 
-        <form className="composer" onSubmit={send}>
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                send(e);
-              }
-            }}
-            placeholder="Message Mint…  (Enter to send, Shift+Enter for newline)"
-            rows={2}
-            disabled={busy}
-          />
-          <button className="primary" type="submit" disabled={busy || !input.trim()}>
-            {busy ? "…" : "Send"}
-          </button>
-        </form>
+        <Composer busy={busy} onSend={send} />
       </section>
 
       <aside className="cognition">

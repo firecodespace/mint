@@ -45,7 +45,7 @@ function App() {
   useEffect(() => {
     const t = setInterval(() => {
       chatStatus().then(setStatus).catch(() => {});
-    }, 8000);
+    }, 20000);
     return () => clearInterval(t);
   }, []);
 

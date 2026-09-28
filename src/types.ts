@@ -6,7 +6,8 @@ export type MemoryKind =
   | "note"
   | "doc_chunk"
   | "measurement"
-  | "event";
+  | "event"
+  | "document";
 
 export type MemorySource = "manual" | "file" | "sensor";
 
@@ -36,6 +37,7 @@ export interface Memory {
   sensitivity: Sensitivity;
   sync_state: SyncState;
   version: number;
+  parent_id: string | null;
 }
 
 // Input for creating a memory (engine fills id/timestamps/engine-managed fields).
@@ -143,4 +145,30 @@ export interface ConversationSummary {
   updated_at: string;
   message_count: number;
   memory_count: number;
+}
+
+// ---- graph & vault -------------------------------------------------------
+
+export interface GraphNode {
+  id: string;
+  label: string;
+  kind: string;
+  parent_id: string | null;
+}
+
+export interface GraphEdge {
+  from: string;
+  to: string;
+  relation: string; // "related" | "part_of"
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface DocIngestResult {
+  id: string;
+  title: string;
+  chunks: number;
 }

@@ -7,9 +7,10 @@ import { Capture } from "./components/Capture";
 import { Search } from "./components/Search";
 import { Browser } from "./components/Browser";
 import { MemoryGraph } from "./components/MemoryGraph";
+import { Vault } from "./components/Vault";
 import { HowItWorks } from "./components/HowItWorks";
 
-type Tab = "chat" | "memory" | "how";
+type Tab = "chat" | "memory" | "vault" | "how";
 type MemView = "graph" | "list";
 
 function App() {
@@ -75,6 +76,9 @@ function App() {
         <button className={tab === "memory" ? "on" : ""} onClick={() => setTab("memory")}>
           Memory <span className="count">{memories.length}</span>
         </button>
+        <button className={tab === "vault" ? "on" : ""} onClick={() => setTab("vault")}>
+          Vault
+        </button>
         <button className={tab === "how" ? "on" : ""} onClick={() => setTab("how")}>
           How it works
         </button>
@@ -120,6 +124,10 @@ function App() {
               </div>
             </div>
           )}
+        </div>
+      ) : tab === "vault" ? (
+        <div className="vault-tab">
+          <Vault memories={memories} onChange={refresh} />
         </div>
       ) : (
         <HowItWorks />

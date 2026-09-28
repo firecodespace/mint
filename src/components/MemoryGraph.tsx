@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Memory } from "../types";
+import { graphData } from "../api";
+import type { GraphData, Memory } from "../types";
 
-// A node is either a memory or a "hub" (a tag, or a kind when a memory has no
-// tags). Memories branch off hubs, producing an Obsidian-like graph/tree.
 interface Node {
   id: string;
-  kind: "memory" | "hub";
+  kind: string;
   label: string;
-  memKind?: string;
+  isChunk: boolean;
   x: number;
   y: number;
   vx: number;
@@ -17,62 +16,27 @@ interface Node {
 interface Edge {
   a: string;
   b: string;
+  relation: string;
 }
 
 const W = 960;
 const H = 640;
-const REPULSE = 5200;
-const SPRING = 0.02;
-const LINK = 90;
+const REPULSE = 4200;
+const SPRING = 0.03;
+const LINK_PART = 55; // chunk -> document (tight cluster)
+const LINK_REL = 120; // related memories (looser)
 const CENTER = 0.006;
 const DAMP = 0.86;
 
-function buildGraph(memories: Memory[]): { nodes: Node[]; edges: Edge[] } {
-  const nodes: Node[] = [];
-  const edges: Edge[] = [];
-  const hubIds = new Map<string, string>();
-
-  const ensureHub = (key: string, label: string) => {
-    if (!hubIds.has(key)) {
-      const id = `hub:${key}`;
-      hubIds.set(key, id);
-      nodes.push({
-        id,
-        kind: "hub",
-        label,
-        x: W / 2 + (Math.random() - 0.5) * 200,
-        y: H / 2 + (Math.random() - 0.5) * 200,
-        vx: 0,
-        vy: 0,
-      });
-    }
-    return hubIds.get(key)!;
-  };
-
-  for (const m of memories) {
-    nodes.push({
-      id: m.id,
-      kind: "memory",
-      label: m.title || m.text.slice(0, 24),
-      memKind: m.kind,
-      x: W / 2 + (Math.random() - 0.5) * 300,
-      y: H / 2 + (Math.random() - 0.5) * 300,
-      vx: 0,
-      vy: 0,
-    });
-    const anchors = m.tags.length > 0 ? m.tags.map((t) => ["tag:" + t, "#" + t]) : [["kind:" + m.kind, m.kind]];
-    for (const [key, label] of anchors) {
-      const hub = ensureHub(key, label);
-      edges.push({ a: m.id, b: hub });
-    }
-  }
-  return { nodes, edges };
+function radius(n: Node, selected: boolean) {
+  if (selected) return n.kind === "document" ? 11 : 9;
+  if (n.kind === "document") return 9;
+  if (n.isChunk) return 3.5;
+  return 6;
 }
 
 export function MemoryGraph({ memories }: { memories: Memory[] }) {
-  const { nodes, edges } = useMemo(() => buildGraph(memories), [memories]);
-  const nodesRef = useRef<Node[]>(nodes);
-  nodesRef.current = nodes;
+  const [data, setData] = useState<GraphData | null>(null);
   const [, setTick] = useState(0);
   const [runId, setRunId] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
@@ -80,11 +44,37 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
   const svgRef = useRef<SVGSVGElement>(null);
 
   useEffect(() => {
+    graphData().then(setData).catch(console.error);
+  }, [memories.length]);
+
+  const { nodes, edges } = useMemo(() => {
+    const ns: Node[] = (data?.nodes ?? []).map((n) => ({
+      id: n.id,
+      kind: n.kind,
+      label: n.label,
+      isChunk: n.kind === "doc_chunk",
+      x: W / 2 + (Math.random() - 0.5) * 320,
+      y: H / 2 + (Math.random() - 0.5) * 320,
+      vx: 0,
+      vy: 0,
+    }));
+    const es: Edge[] = (data?.edges ?? []).map((e) => ({
+      a: e.from,
+      b: e.to,
+      relation: e.relation,
+    }));
+    return { nodes: ns, edges: es };
+  }, [data]);
+
+  const nodesRef = useRef<Node[]>(nodes);
+  nodesRef.current = nodes;
+
+  useEffect(() => {
     let raf = 0;
     let frames = 0;
+    const byId = new Map(nodesRef.current.map((n) => [n.id, n]));
     const step = () => {
       const ns = nodesRef.current;
-      // repulsion
       for (let i = 0; i < ns.length; i++) {
         for (let j = i + 1; j < ns.length; j++) {
           const a = ns[i];
@@ -99,30 +89,26 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
           }
           const f = REPULSE / d2;
           const d = Math.sqrt(d2);
-          const fx = (dx / d) * f;
-          const fy = (dy / d) * f;
-          a.vx += fx;
-          a.vy += fy;
-          b.vx -= fx;
-          b.vy -= fy;
+          a.vx += (dx / d) * f;
+          a.vy += (dy / d) * f;
+          b.vx -= (dx / d) * f;
+          b.vy -= (dy / d) * f;
         }
       }
-      // springs
-      const byId = new Map(ns.map((n) => [n.id, n]));
       for (const e of edges) {
         const a = byId.get(e.a);
         const b = byId.get(e.b);
         if (!a || !b) continue;
+        const target = e.relation === "part_of" ? LINK_PART : LINK_REL;
         const dx = b.x - a.x;
         const dy = b.y - a.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const diff = ((dist - LINK) / dist) * SPRING;
+        const diff = ((dist - target) / dist) * SPRING;
         a.vx += dx * diff;
         a.vy += dy * diff;
         b.vx -= dx * diff;
         b.vy -= dy * diff;
       }
-      // centering + integrate; track kinetic energy so we can stop when settled.
       let energy = 0;
       for (const n of ns) {
         if (n.pinned) {
@@ -140,10 +126,8 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
       }
       setTick((t) => (t + 1) % 1000000);
       frames++;
-      // Stop once the layout settles (or after a hard cap) so it stops
-      // re-rendering and consuming CPU.
-      const settled = frames > 40 && energy < 0.4;
-      if (frames < 400 && !settled) raf = requestAnimationFrame(step);
+      const settled = frames > 50 && energy < 0.4;
+      if (frames < 500 && !settled) raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
@@ -176,11 +160,14 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
   const byId = new Map(ns.map((n) => [n.id, n]));
   const sel = selected ? memories.find((m) => m.id === selected) : null;
 
-  if (memories.length === 0) {
+  if (!data) {
+    return <div className="graph-empty muted">Loading memory graph…</div>;
+  }
+  if (ns.length === 0) {
     return (
       <div className="graph-empty muted">
-        No memories yet. Chat with Mint or add one in the Search/Capture panel — the
-        graph grows as memories link through shared tags.
+        No memories yet. Chat with Mint or drop a document in the Vault — the graph grows
+        as memories relate and documents branch into chunks.
       </div>
     );
   }
@@ -200,39 +187,46 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
           const a = byId.get(e.a);
           const b = byId.get(e.b);
           if (!a || !b) return null;
-          return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="graph-edge" />;
-        })}
-        {ns.map((n) => {
-          if (n.kind === "hub") {
-            return (
-              <g key={n.id} transform={`translate(${n.x},${n.y})`} className="graph-hub">
-                <circle r={7} />
-                <text x={10} y={4}>
-                  {n.label}
-                </text>
-              </g>
-            );
-          }
           return (
-            <g
-              key={n.id}
-              transform={`translate(${n.x},${n.y})`}
-              className={`graph-node ${n.memKind} ${selected === n.id ? "sel" : ""}`}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                dragId.current = n.id;
-                setSelected(n.id);
-                setRunId((r) => r + 1); // wake the (possibly settled) sim
-              }}
-            >
-              <circle r={selected === n.id ? 9 : 6} />
-              <text x={11} y={4}>
-                {n.label}
-              </text>
-            </g>
+            <line
+              key={i}
+              x1={a.x}
+              y1={a.y}
+              x2={b.x}
+              y2={b.y}
+              className={`graph-edge ${e.relation}`}
+            />
           );
         })}
+        {ns.map((n) => (
+          <g
+            key={n.id}
+            transform={`translate(${n.x},${n.y})`}
+            className={`graph-node ${n.kind} ${selected === n.id ? "sel" : ""}`}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              dragId.current = n.id;
+              setSelected(n.id);
+              setRunId((r) => r + 1);
+            }}
+          >
+            <circle r={radius(n, selected === n.id)} />
+            {!n.isChunk && (
+              <text x={radius(n, selected === n.id) + 4} y={4}>
+                {n.label}
+              </text>
+            )}
+          </g>
+        ))}
       </svg>
+
+      <div className="graph-legend">
+        <span><i className="lg document" /> document</span>
+        <span><i className="lg note" /> memory</span>
+        <span><i className="lg chunk" /> chunk</span>
+        <span><i className="lg e-part" /> part of</span>
+        <span><i className="lg e-rel" /> related</span>
+      </div>
 
       {sel && (
         <div className="graph-detail">
@@ -250,7 +244,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
                 #{t}
               </span>
             ))}
-            {sel.site_id && <span>site: {sel.site_id}</span>}
+            {sel.source && <span>source: {sel.source}</span>}
             <span className={`sync ${sel.sync_state}`}>{sel.sync_state}</span>
           </div>
         </div>

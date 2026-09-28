@@ -6,6 +6,8 @@ import type {
   ChatTurnResult,
   Conversation,
   ConversationSummary,
+  DocIngestResult,
+  GraphData,
   Memory,
   NewMemory,
   SearchRequest,
@@ -67,4 +69,22 @@ export function renameConversation(id: string, title: string): Promise<void> {
 
 export function deleteConversation(id: string, deleteMemories: boolean): Promise<void> {
   return invoke<void>("delete_conversation", { id, deleteMemories });
+}
+
+// ---- graph & vault -------------------------------------------------------
+
+export function graphData(): Promise<GraphData> {
+  return invoke<GraphData>("graph_data");
+}
+
+export function ingestDocument(name: string, dataBase64: string): Promise<DocIngestResult> {
+  return invoke<DocIngestResult>("ingest_document", { name, dataBase64 });
+}
+
+export function listDocuments(): Promise<Memory[]> {
+  return invoke<Memory[]>("list_documents");
+}
+
+export function deleteDocument(id: string): Promise<void> {
+  return invoke<void>("delete_document", { id });
 }

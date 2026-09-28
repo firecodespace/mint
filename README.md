@@ -32,7 +32,21 @@ src-tauri/    Rust core
   src/commands.rs   Tauri commands bridging UI <-> core
 ```
 
+## Development notes
+
+- **Always build from `src-tauri/`** (`cargo` runs there, and `npm run tauri dev`
+  invokes cargo there). `mint-core` compiles into `src-tauri/target` as a path
+  dependency. Do **not** run `cargo` from `crates/mint-core` or add a workspace root:
+  a new target directory produces fresh build-script binaries that Windows Smart App
+  Control blocks (`os error 4551`). The `src-tauri/target` location is trusted.
+- **`MINT_DATA_DIR`** overrides where memory is stored. In dev we set it to
+  `D:\mint\.mint-data` (project-local, easy to inspect). Unset -> per-user app data dir.
+- **`MINT_CHAT_MODEL` / `MINT_FAST_MODEL`** override the Ollama models (defaults:
+  `qwen3:8b` for chat with visible thinking, `llama3.2:latest` for extraction).
+- Requires a local **Ollama** server on `localhost:11434` with a model pulled.
+
 ## Status
-Phase 1 (retrieval engine) — in progress. See the roadmap in `SPEC.md`.
+Phase 2 (cognitive core: `mint-core` + Ollama chat + memory capture) — in progress.
+See the roadmap in `SPEC.md`.
 
 _Xarch Labs_

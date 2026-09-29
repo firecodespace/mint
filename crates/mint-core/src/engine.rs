@@ -391,6 +391,116 @@ impl MemoryEngine {
 
     // ---- graph -----------------------------------------------------------
 
+    // ---- sync (edge <-> cloud) ------------------------------------------
+
+    pub fn sync_counts(&self) -> Result<SyncCounts> {
+        let mut c = SyncCounts::default();
+        for m in self.list()? {
+            match m.sync_state {
+                SyncState::Pending => c.pending += 1,
+                SyncState::Synced => c.synced += 1,
+                SyncState::Conflict => c.conflict += 1,
+                SyncState::LocalOnly => c.local_only += 1,
+            }
+        }
+        Ok(c)
+    }
+
+    fn to_server_point(&self, m: &Memory) -> Result<ServerPoint> {
+        let (dense, sparse) = self.embedders.embed_document(&m.text)?;
+        Ok(ServerPoint {
+            id: uuid_string(&m.id)?,
+            dense,
+            sparse_indices: sparse.indices,
+            sparse_values: sparse.values,
+            payload: serde_json::to_value(m)?,
+        })
+    }
+
+    /// Two-way sync with a Qdrant Server. Local-only and entity nodes never
+    /// leave the device. Divergences resolve last-write-wins by `updated_at`.
+    pub fn sync(&self, client: &SyncClient) -> Result<SyncReport> {
+        client.ensure_collection(DENSE_DIM)?;
+
+        // Remote state, keyed by memory id (from payloads).
+        let mut remote: HashMap<String, Memory> = HashMap::new();
+        for p in client.scroll_all()? {
+            if let Ok(m) = serde_json::from_value::<Memory>(p) {
+                remote.insert(m.id.clone(), m);
+            }
+        }
+
+        // Local syncable memories (shareable, non-entity).
+        let local: HashMap<String, Memory> = self
+            .list()?
+            .into_iter()
+            .filter(|m| m.sensitivity == Sensitivity::Shareable && m.kind != MemoryKind::Entity)
+            .map(|m| (m.id.clone(), m))
+            .collect();
+
+        let mut report = SyncReport::default();
+        let mut to_push: Vec<Memory> = Vec::new();
+        let mut to_pull: Vec<Memory> = Vec::new();
+
+        let mut ids: std::collections::HashSet<&String> = local.keys().collect();
+        ids.extend(remote.keys());
+
+        for id in ids {
+            match (local.get(id), remote.get(id)) {
+                (Some(l), None) => to_push.push(l.clone()),
+                (None, Some(r)) => to_pull.push(r.clone()),
+                (Some(l), Some(r)) => {
+                    if l.updated_at == r.updated_at {
+                        // Already in agreement; mark synced if still pending.
+                        if l.sync_state == SyncState::Pending {
+                            let mut m = l.clone();
+                            m.sync_state = SyncState::Synced;
+                            let _ = self.upsert(&m);
+                        }
+                    } else {
+                        // Divergence: last write wins, but flag it as a conflict
+                        // that was auto-resolved.
+                        report.conflicts += 1;
+                        if l.updated_at > r.updated_at {
+                            to_push.push(l.clone());
+                        } else {
+                            to_pull.push(r.clone());
+                        }
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+
+        // Push (embed + upsert to server, then mark local synced).
+        if !to_push.is_empty() {
+            let points: Vec<ServerPoint> = to_push
+                .iter()
+                .filter_map(|m| self.to_server_point(m).ok())
+                .collect();
+            client.upsert(&points)?;
+            for m in &to_push {
+                let mut mm = m.clone();
+                mm.sync_state = SyncState::Synced;
+                if self.upsert(&mm).is_ok() {
+                    report.pushed += 1;
+                }
+            }
+        }
+
+        // Pull (store remote memory locally, marked synced).
+        for r in &to_pull {
+            let mut mm = r.clone();
+            mm.sync_state = SyncState::Synced;
+            if self.upsert(&mm).is_ok() {
+                report.pulled += 1;
+            }
+        }
+
+        self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
+        Ok(report)
+    }
+
     pub fn graph_data(&self) -> Result<GraphData> {
         let memories = self.list()?;
         let nodes: Vec<GraphNode> = memories
@@ -518,6 +628,13 @@ fn point_id(ulid_str: &str) -> Result<PointId> {
     let ulid = ulid::Ulid::from_string(ulid_str).context("invalid ULID")?;
     let uuid = qdrant_edge::external::uuid::Uuid::from_bytes(ulid.to_bytes());
     Ok(PointId::Uuid(uuid))
+}
+
+/// Same derivation as `point_id`, as a hyphenated UUID string for the server.
+fn uuid_string(ulid_str: &str) -> Result<String> {
+    let ulid = ulid::Ulid::from_string(ulid_str).context("invalid ULID")?;
+    let uuid = qdrant_edge::external::uuid::Uuid::from_bytes(ulid.to_bytes());
+    Ok(uuid.to_string())
 }
 
 fn nearest(vector_name: &str, vector: VectorInternal) -> ScoringQuery {

@@ -119,3 +119,13 @@ export function runMaintenance(): Promise<MaintenanceReport> {
 export function clearArchive(): Promise<number> {
   return invoke<number>("clear_archive");
 }
+
+// ---- timeline ------------------------------------------------------------
+
+export function listScheduled(): Promise<Memory[]> {
+  return invoke<Memory[]>("list_scheduled");
+}
+
+export function setTaskDone(id: string, done: boolean): Promise<void> {
+  return invoke<void>("set_task_done", { id, done });
+}

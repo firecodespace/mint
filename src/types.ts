@@ -41,6 +41,8 @@ export interface Memory {
   version: number;
   parent_id: string | null;
   archived: boolean;
+  due_at: string | null;
+  done: boolean;
 }
 
 // Input for creating a memory (engine fills id/timestamps/engine-managed fields).

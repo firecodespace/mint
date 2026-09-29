@@ -13,7 +13,7 @@ const FILE: &str = "edges.json";
 pub struct GraphEdge {
     pub from: String,
     pub to: String,
-    pub relation: String, // "related" | "part_of"
+    pub relation: String, // "related" | "part_of" | "mentions" | "in_topic"
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +97,21 @@ impl GraphStore {
             to: document.to_string(),
             relation: "part_of".into(),
         });
+        self.save()
+    }
+
+    /// Record that a memory/document is filed under a topic. Replaces any prior
+    /// in_topic edge from `member` so reassignment stays clean (one topic each).
+    pub fn add_in_topic(&mut self, member: &str, topic: &str) -> Result<()> {
+        self.edges
+            .retain(|e| !(e.relation == "in_topic" && e.from == member));
+        if member != topic {
+            self.edges.push(GraphEdge {
+                from: member.to_string(),
+                to: topic.to_string(),
+                relation: "in_topic".into(),
+            });
+        }
         self.save()
     }
 

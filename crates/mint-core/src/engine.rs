@@ -55,6 +55,9 @@ const CONSOLIDATE_MAX_ENTITIES: usize = 12;
 const RELATED_THRESHOLD: f32 = 0.55;
 /// Max related edges recorded per memory.
 const RELATED_MAX: usize = 4;
+/// Dense similarity above which new content joins an existing topic rather than
+/// spawning a new one. Tuned for "same subject" over all-MiniLM-L6-v2.
+const TOPIC_JOIN_THRESHOLD: f32 = 0.42;
 
 const DENSE_NAME: &str = "dense";
 const SPARSE_NAME: &str = "sparse";
@@ -170,6 +173,7 @@ impl MemoryEngine {
         // queued as pending for the next sync.
         let sync_state = if input.sensitivity == Sensitivity::LocalOnly
             || input.kind == MemoryKind::Entity
+            || input.kind == MemoryKind::Topic
         {
             SyncState::LocalOnly
         } else {
@@ -203,8 +207,12 @@ impl MemoryEngine {
             .flush()
             .map_err(|e| anyhow!("flush failed: {e}"))?;
         // Establish semantic relationships (skip chunks: they connect via
-        // part_of; skip entities: they are hubs connected via mentions).
-        if memory.kind != MemoryKind::DocChunk && memory.kind != MemoryKind::Entity {
+        // part_of; skip entities and topics: they are hubs connected via
+        // mentions / in_topic).
+        if memory.kind != MemoryKind::DocChunk
+            && memory.kind != MemoryKind::Entity
+            && memory.kind != MemoryKind::Topic
+        {
             self.link_related(&memory);
         }
         Ok(memory)
@@ -373,6 +381,81 @@ impl MemoryEngine {
             let _ = meta.add_tombstone(id, &chrono::Utc::now().to_rfc3339());
         }
         Ok(())
+    }
+
+    // ---- topics (the schema / organizing layer) -------------------------
+
+    /// Route a memory to a topic and persist the assignment (payload-only, no
+    /// re-embed). Returns the topic id it was filed under, or None on failure.
+    /// `text` grounds routing; `model` (may be empty) names a new topic.
+    pub fn route_and_assign(&self, mem_id: &str, text: &str, model: &str) -> Option<String> {
+        let topic_id = self.route_to_topic(text, model).ok().flatten()?;
+        // File the memory under the topic; touch the topic to keep it fresh.
+        let _ = self.set_payload_fields(mem_id, serde_json::json!({ "topic_id": topic_id }));
+        let _ = self.set_payload_fields(
+            &topic_id,
+            serde_json::json!({ "updated_at": chrono::Utc::now().to_rfc3339() }),
+        );
+        if let Ok(mut g) = self.graph.lock() {
+            let _ = g.add_in_topic(mem_id, &topic_id);
+        }
+        let _ = self.shard.flush();
+        Some(topic_id)
+    }
+
+    /// Find the nearest existing topic to `text`; if none is close enough, mint
+    /// and name a new one. Returns the chosen topic id.
+    fn route_to_topic(&self, text: &str, model: &str) -> Result<Option<String>> {
+        let probe: String = text.chars().take(2000).collect();
+        if probe.trim().is_empty() {
+            return Ok(None);
+        }
+        // Nearest existing topic by dense similarity.
+        let hits = self.search(SearchRequest {
+            query: probe.clone(),
+            mode: SearchMode::Dense,
+            limit: 1,
+            site_id: None,
+            kind: Some(MemoryKind::Topic),
+        })?;
+        if let Some(top) = hits.results.first() {
+            if top.score >= TOPIC_JOIN_THRESHOLD {
+                return Ok(Some(top.memory.id.clone()));
+            }
+        }
+        // Nothing close: create a topic named from the content.
+        let name = self.name_topic(&probe, model);
+        let topic = self.add(NewMemory {
+            kind: MemoryKind::Topic,
+            title: name.clone(),
+            text: name,
+            site_id: String::new(),
+            asset_id: String::new(),
+            geo: None,
+            tags: vec!["topic".to_string()],
+            source: MemorySource::Manual,
+            sensitivity: Sensitivity::Shareable,
+            parent_id: None,
+            topic_id: None,
+            due_at: None,
+        })?;
+        Ok(Some(topic.id))
+    }
+
+    /// Generate a short topic label from content (fast model; heuristic fallback).
+    fn name_topic(&self, text: &str, model: &str) -> String {
+        if !model.trim().is_empty() {
+            let system = "You name the subject of a note or document for a personal knowledge \
+base. Reply with ONLY a 2 to 4 word topic label in Title Case. No quotes, no punctuation, \
+no explanation.";
+            if let Ok(s) = self.ollama.generate(model, Some(system), text, false) {
+                let label = clean_label(&s);
+                if !label.is_empty() {
+                    return label;
+                }
+            }
+        }
+        heuristic_label(text)
     }
 
     // ---- documents (Vault) ----------------------------------------------
@@ -1213,6 +1296,42 @@ impl MemoryEngine {
 /// Build a JsonPath for a payload field (our field names are simple identifiers).
 fn jpath(field: &str) -> JsonPath {
     field.parse().expect("valid payload field path")
+}
+
+/// Clean a model's topic-label reply: first non-empty line, quotes/punctuation
+/// stripped, capped at 5 words.
+fn clean_label(s: &str) -> String {
+    let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let cleaned = line.trim_matches(|c: char| {
+        c == '"' || c == '\'' || c == '.' || c == ':' || c == '-' || c == '*' || c == '#'
+    });
+    cleaned.split_whitespace().take(5).collect::<Vec<_>>().join(" ")
+}
+
+/// Fallback topic label: the first few significant words of the content, in
+/// Title Case.
+fn heuristic_label(text: &str) -> String {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "with", "this", "that", "from", "your", "you", "are", "was",
+        "were", "have", "has", "about", "into", "over", "will", "would", "should",
+    ];
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 4 && !STOP.contains(&w.to_lowercase().as_str()))
+        .take(3)
+        .map(|w| {
+            let mut cs = w.chars();
+            match cs.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + &cs.as_str().to_lowercase(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    if words.is_empty() {
+        "General".to_string()
+    } else {
+        words.join(" ")
+    }
 }
 
 /// Does the query ask about the user themselves? Detects first-person pronouns

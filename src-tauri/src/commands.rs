@@ -548,6 +548,9 @@ fn run_turn(
             if let Ok(Some(m)) = eng.add_if_novel(nm, DEDUP_THRESHOLD) {
                 // Link the new memory to the entities it mentions.
                 let _ = eng.attach_entities(&m.id, &m.text, &fast_model);
+                // File it under a topic (schema layer): join the nearest subject
+                // or start a new one. Keeps a research thread coherent.
+                let _ = eng.route_and_assign(&m.id, &m.text, &fast_model);
                 let item = CapturedItem {
                     id: m.id.clone(),
                     title: m.title.clone(),

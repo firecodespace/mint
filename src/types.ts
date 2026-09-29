@@ -9,7 +9,8 @@ export type MemoryKind =
   | "event"
   | "document"
   | "entity"
-  | "summary";
+  | "summary"
+  | "topic";
 
 export type MemorySource = "manual" | "file" | "sensor";
 
@@ -40,6 +41,7 @@ export interface Memory {
   sync_state: SyncState;
   version: number;
   parent_id: string | null;
+  topic_id: string | null;
   archived: boolean;
   due_at: string | null;
   done: boolean;

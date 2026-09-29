@@ -82,6 +82,12 @@ pub fn run() {
             commands::clear_archive,
             commands::list_scheduled,
             commands::set_task_done,
+            commands::list_topics,
+            commands::rename_topic,
+            commands::merge_topics,
+            commands::move_to_topic,
+            commands::refresh_topic,
+            commands::organize_topics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

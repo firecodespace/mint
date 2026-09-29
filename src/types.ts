@@ -185,6 +185,8 @@ export interface MaintenanceReport {
   summaries: number;
   archived: number;
   active: number;
+  topics_summarized: number;
+  topics_rehomed: number;
 }
 
 export interface GraphEdge {

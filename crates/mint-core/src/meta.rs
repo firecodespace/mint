@@ -23,6 +23,23 @@ struct MetaData {
     /// deleted memory id -> RFC3339 deletion time (for delete propagation).
     #[serde(default)]
     tombstones: HashMap<String, String>,
+    /// topic id -> rolling-summary bookkeeping.
+    #[serde(default)]
+    topics: HashMap<String, TopicState>,
+}
+
+/// Bookkeeping for a topic's rolling summary and naming.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TopicState {
+    /// Members added/moved since the summary was last refreshed.
+    #[serde(default)]
+    pub changes_since_summary: u32,
+    /// RFC3339 time of the last summary refresh (None = never summarized).
+    #[serde(default)]
+    pub summarized_at: Option<String>,
+    /// The user named this topic; automatic renaming must not override it.
+    #[serde(default)]
+    pub user_named: bool,
 }
 
 pub struct MetaStore {
@@ -110,5 +127,28 @@ impl MetaStore {
     }
     pub fn tombstones(&self) -> &HashMap<String, String> {
         &self.data.tombstones
+    }
+
+    // ---- topic bookkeeping (rolling summaries) ----
+    pub fn topic_state(&self, id: &str) -> TopicState {
+        self.data.topics.get(id).cloned().unwrap_or_default()
+    }
+    pub fn mark_topic_changed(&mut self, id: &str) -> Result<()> {
+        self.data.topics.entry(id.to_string()).or_default().changes_since_summary += 1;
+        self.save()
+    }
+    pub fn mark_topic_summarized(&mut self, id: &str, ts: &str) -> Result<()> {
+        let s = self.data.topics.entry(id.to_string()).or_default();
+        s.changes_since_summary = 0;
+        s.summarized_at = Some(ts.to_string());
+        self.save()
+    }
+    pub fn set_topic_user_named(&mut self, id: &str) -> Result<()> {
+        self.data.topics.entry(id.to_string()).or_default().user_named = true;
+        self.save()
+    }
+    pub fn remove_topic(&mut self, id: &str) -> Result<()> {
+        self.data.topics.remove(id);
+        self.save()
     }
 }

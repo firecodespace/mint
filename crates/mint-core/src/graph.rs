@@ -23,6 +23,8 @@ pub struct GraphNode {
     pub label: String,
     pub kind: String,
     pub parent_id: Option<String>,
+    /// Topic the node is filed under (chunks inherit their document's topic).
+    pub topic_id: Option<String>,
     pub salience: f32,
 }
 
@@ -30,6 +32,8 @@ pub struct GraphNode {
 pub struct GraphData {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+    /// Memories decayed into the archive ("forgotten"), not drawn.
+    pub archived: usize,
 }
 
 #[derive(Default)]

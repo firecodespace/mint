@@ -44,6 +44,21 @@ pub fn format_context(results: &[SearchResult]) -> String {
     out
 }
 
+/// Subject overviews (rolling topic summaries) for the subjects the question
+/// belongs to. Placed before the individual memories so the model reads the
+/// big picture first, then the details.
+pub fn format_topic_overview(topics: &[(String, String)]) -> String {
+    if topics.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("Subject overview (distilled from the user's memories):\n");
+    for (name, summary) in topics {
+        out.push_str(&format!("- {name}: {}\n", truncate(summary, 700)));
+    }
+    out.push_str("\nIndividual memories:\n");
+    out
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -121,6 +136,9 @@ pub fn is_query_only(msg: &str) -> bool {
         "analyse", "write", "make", "create", "generate", "suggest", "recommend", "define",
         "translate", "fix", "draft", "review", "calculate", "convert", "pull", "fetch", "open",
         "let", "lets",
+        // Scheduling/admin commands: the timeline extractor handles their dates;
+        // they must not ALSO become free-floating "Deadline" notes.
+        "set", "schedule", "book", "cancel", "send", "remove", "delete", "rename",
     ];
     QUESTION_WORDS.contains(&first) || COMMAND_WORDS.contains(&first)
 }

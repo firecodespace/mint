@@ -12,7 +12,8 @@ use qdrant_edge::{
     EdgeVectorParamsBuilder, FieldCondition, FieldIndexOperations, Filter, Fusion, JsonPath, Match,
     Modifier, NamedQuery, Payload, PayloadFieldSchema, PayloadOps, PayloadSchemaType, PointId,
     PointInsertOperations, PointOperations, PointStruct, PointStructPersisted, PrefetchBuilder,
-    QueryEnum, QueryRequestBuilder, ScoringQuery, ScrollRequestBuilder, SetPayloadOp,
+    QueryEnum, QueryRequestBuilder, RetrieveRequestBuilder, ScoringQuery, ScrollRequestBuilder,
+    SetPayloadOp, CountRequestBuilder,
     UpdateOperation, Vector, VectorInternal, Vectors, WithPayloadInterface,
 };
 
@@ -42,6 +43,10 @@ pub struct MaintenanceReport {
     pub summaries: usize,
     pub archived: usize,
     pub active: usize,
+    /// Topics whose rolling summary was refreshed this pass.
+    pub topics_summarized: usize,
+    /// Memories re-homed from small topics into established ones.
+    pub topics_rehomed: usize,
 }
 
 /// Decay thresholds.
@@ -55,9 +60,87 @@ const CONSOLIDATE_MAX_ENTITIES: usize = 12;
 const RELATED_THRESHOLD: f32 = 0.55;
 /// Max related edges recorded per memory.
 const RELATED_MAX: usize = 4;
-/// Dense similarity above which new content joins an existing topic rather than
-/// spawning a new one. Tuned for "same subject" over all-MiniLM-L6-v2.
-const TOPIC_JOIN_THRESHOLD: f32 = 0.42;
+/// Retrieval + organization parameters. Defaults are chosen by the benchmark
+/// (`cargo run --release --example bench`); override with `set_tuning`.
+#[derive(Debug, Clone, Copy)]
+pub struct Tuning {
+    /// Min dense similarity of an already-filed neighbour for its topic to get
+    /// a routing vote (kNN routing).
+    pub topic_join: f32,
+    /// Min similarity to a topic node itself (name + rolling summary).
+    pub topic_join_direct: f32,
+    /// Min share of the topic vote for a topic to activate at query time.
+    pub activation_min: f32,
+    /// Top-topic share above which off-topic results are demoted.
+    pub focus_conf: f32,
+    /// Score multiplier for results outside the active topics when focused.
+    pub offtopic_penalty: f32,
+    /// RRF weight of an activated topic's member list (times its share).
+    pub topic_weight: f32,
+    /// RRF weight of a document the query names explicitly.
+    pub named_weight: f32,
+    /// RRF weight of profile documents for questions about the user.
+    pub profile_weight: f32,
+    /// RRF rank constant (smaller = sharper preference for top ranks).
+    pub rrf_k: f32,
+    /// Max results from any one document in the final context.
+    pub per_doc_cap: usize,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            // Benchmarked at scale (150 distractor docs incl. hard negatives):
+            // 0.40 lets a distractor topic absorb a real paper; 0.45 keeps every
+            // topic pure with the best grouping; 0.50+ over-splits.
+            topic_join: 0.45,
+            topic_join_direct: 0.55,
+            activation_min: 0.30,
+            focus_conf: 0.55,
+            offtopic_penalty: 0.6,
+            topic_weight: 1.0,
+            named_weight: 1.5,
+            profile_weight: 1.0,
+            rrf_k: 30.0,
+            per_doc_cap: 3,
+        }
+    }
+}
+
+/// A topic as shown to the user (legend / management UI).
+#[derive(Debug, Clone, Serialize)]
+pub struct TopicInfo {
+    pub id: String,
+    pub name: String,
+    pub summary: String,
+    pub members: usize,
+    pub user_named: bool,
+    pub updated_at: String,
+}
+
+/// Result of organizing existing (unfiled) memories into topics.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct OrganizeReport {
+    pub routed: usize,
+    pub topics: usize,
+    pub summarized: usize,
+}
+
+/// Topic activated for a query, with its rolling summary (if any).
+#[derive(Debug, Clone, Serialize)]
+pub struct TopicHit {
+    pub id: String,
+    pub name: String,
+    pub summary: String,
+    pub confidence: f32,
+}
+
+/// Everything chat grounding needs: ranked evidence + the subjects it belongs to.
+#[derive(Debug, Clone, Serialize)]
+pub struct RetrievalContext {
+    pub results: Vec<SearchResult>,
+    pub topics: Vec<TopicHit>,
+}
 
 const DENSE_NAME: &str = "dense";
 const SPARSE_NAME: &str = "sparse";
@@ -75,6 +158,7 @@ pub struct MemoryEngine {
     ollama: Ollama,
     /// normalized entity name -> entity memory id (dedup).
     entity_index: Mutex<HashMap<String, String>>,
+    tuning: Tuning,
 }
 
 impl MemoryEngine {
@@ -103,10 +187,19 @@ impl MemoryEngine {
             meta: Mutex::new(meta),
             ollama: Ollama::new(),
             entity_index: Mutex::new(HashMap::new()),
+            tuning: Tuning::default(),
         };
         engine.ensure_indexes();
         engine.rebuild_entity_index();
         Ok(engine)
+    }
+
+    pub fn tuning(&self) -> Tuning {
+        self.tuning
+    }
+
+    pub fn set_tuning(&mut self, t: Tuning) {
+        self.tuning = t;
     }
 
     /// Rebuild the entity name -> id map from existing Entity nodes.
@@ -413,70 +506,550 @@ impl MemoryEngine {
     /// re-embed). Returns the topic id it was filed under, or None on failure.
     /// `text` grounds routing; `model` (may be empty) names a new topic.
     pub fn route_and_assign(&self, mem_id: &str, text: &str, model: &str) -> Option<String> {
-        self.route_and_assign_opts(mem_id, text, model, true)
+        self.route_and_assign_opts(mem_id, text, model, true, None)
     }
 
+    /// `name_hint` names a newly created topic without an LLM call (documents
+    /// pass their title-derived name).
     fn route_and_assign_opts(
         &self,
         mem_id: &str,
         text: &str,
         model: &str,
         flush: bool,
+        name_hint: Option<&str>,
     ) -> Option<String> {
-        let topic_id = self.route_to_topic(text, model).ok().flatten()?;
-        // File the memory under the topic; touch the topic to keep it fresh.
+        let topic_id = self.route_to_topic(text, model, mem_id, name_hint).ok().flatten()?;
+        self.assign_topic(mem_id, &topic_id, flush);
+        Some(topic_id)
+    }
+
+    /// File a memory under a topic (payload-only), touch the topic, and record
+    /// the in_topic edge. Shared by routing and the user's manual overrides.
+    fn assign_topic(&self, mem_id: &str, topic_id: &str, flush: bool) {
         let _ = self.set_payload_fields(mem_id, serde_json::json!({ "topic_id": topic_id }));
         let _ = self.set_payload_fields(
-            &topic_id,
+            topic_id,
             serde_json::json!({ "updated_at": chrono::Utc::now().to_rfc3339() }),
         );
         if let Ok(mut g) = self.graph.lock() {
-            let _ = g.add_in_topic(mem_id, &topic_id);
+            let _ = g.add_in_topic(mem_id, topic_id);
+        }
+        if let Ok(mut m) = self.meta.lock() {
+            let _ = m.mark_topic_changed(topic_id);
         }
         if flush {
             let _ = self.shard.flush();
         }
-        Some(topic_id)
     }
 
-    /// Find the nearest existing topic to `text`; if none is close enough, mint
-    /// and name a new one. Returns the chosen topic id. Never flushes: callers
-    /// own durability.
-    fn route_to_topic(&self, text: &str, model: &str) -> Result<Option<String>> {
+    /// Route by k-nearest-neighbour vote: memories that are already filed and
+    /// similar to `text` vote for their topic (weighted by similarity), plus the
+    /// topic nodes themselves (name + rolling summary). This compares new content
+    /// with a topic's actual CONTENT, not just its 2-4 word name. If nothing is
+    /// close enough, a new topic is minted and named. Never flushes: callers own
+    /// durability. `exclude` is the memory being routed (and its chunks).
+    fn route_to_topic(
+        &self,
+        text: &str,
+        model: &str,
+        exclude: &str,
+        name_hint: Option<&str>,
+    ) -> Result<Option<String>> {
+        let t = self.tuning;
         let probe: String = text.chars().take(2000).collect();
         if probe.trim().is_empty() {
             return Ok(None);
         }
-        // Nearest existing topic by dense similarity.
-        let hits = self.search(SearchRequest {
-            query: probe.clone(),
-            mode: SearchMode::Dense,
-            limit: 1,
-            site_id: None,
-            kind: Some(MemoryKind::Topic),
-        })?;
-        if let Some(top) = hits.results.first() {
-            if top.score >= TOPIC_JOIN_THRESHOLD {
-                return Ok(Some(top.memory.id.clone()));
+        let (dense, _) = self.embedders.embed_query(&probe)?;
+
+        let mut votes: HashMap<String, f32> = HashMap::new();
+        for h in self.query_points(&dense, None, Some(content_filter()), 12)? {
+            if h.memory.id == exclude || h.memory.parent_id.as_deref() == Some(exclude) {
+                continue;
+            }
+            if h.score < t.topic_join {
+                continue;
+            }
+            if let Some(tid) = h.memory.topic_id {
+                *votes.entry(tid).or_insert(0.0) += h.score;
             }
         }
-        // Nothing close: create a topic named from the content.
-        let name = self.name_topic(&probe, model);
-        let topic = self.add_opts(NewMemory {
-            kind: MemoryKind::Topic,
-            title: name.clone(),
-            text: name,
-            site_id: String::new(),
-            asset_id: String::new(),
-            geo: None,
-            tags: vec!["topic".to_string()],
-            source: MemorySource::Manual,
-            sensitivity: Sensitivity::Shareable,
-            parent_id: None,
-            topic_id: None,
-            due_at: None,
-        }, false)?;
-        Ok(Some(topic.id))
+        for h in self.query_points(&dense, None, Some(kind_filter(MemoryKind::Topic)), 3)? {
+            if h.score >= t.topic_join_direct {
+                *votes.entry(h.memory.id).or_insert(0.0) += h.score;
+            }
+        }
+        if let Some((tid, _)) = votes
+            .into_iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            return Ok(Some(tid));
+        }
+
+        // Nothing close: create a topic, named by the hint (e.g. the document's
+        // title) or else from the content.
+        let name = match name_hint.map(str::trim).filter(|h| !h.is_empty()) {
+            Some(h) => h.to_string(),
+            None => self.name_topic(&probe, model),
+        };
+        Ok(Some(self.create_topic(&name, &[])?))
+    }
+
+    /// Create an (unsummarized) topic node and return its id.
+    fn create_topic(&self, name: &str, extra_tags: &[&str]) -> Result<String> {
+        let mut tags = vec!["topic".to_string()];
+        tags.extend(extra_tags.iter().map(|s| s.to_string()));
+        let topic = self.add_opts(
+            NewMemory {
+                kind: MemoryKind::Topic,
+                title: name.to_string(),
+                text: name.to_string(),
+                site_id: String::new(),
+                asset_id: String::new(),
+                geo: None,
+                tags,
+                source: MemorySource::Manual,
+                sensitivity: Sensitivity::Shareable,
+                parent_id: None,
+                topic_id: None,
+                due_at: None,
+            },
+            false,
+        )?;
+        Ok(topic.id)
+    }
+
+    /// The dedicated topic for identity documents (resume / CV / about-me), so
+    /// the user's profile never dissolves into whichever research topic it
+    /// happens to mention.
+    fn profile_topic(&self) -> Result<String> {
+        if let Some(t) = self
+            .list_kind(MemoryKind::Topic)?
+            .into_iter()
+            .find(|t| t.tags.iter().any(|x| x == "profile"))
+        {
+            return Ok(t.id);
+        }
+        self.create_topic("Profile", &["profile"])
+    }
+
+    // ---- topic management + rolling summaries ---------------------------
+
+    /// Content members of a topic (documents, notes, events...; not chunks).
+    pub fn topic_members(&self, topic_id: &str) -> Result<Vec<Memory>> {
+        let mut f = content_filter();
+        f.must = Some(vec![match_cond("topic_id", topic_id)]);
+        if let Some(nots) = f.must_not.as_mut() {
+            nots.push(match_cond("kind", "doc_chunk"));
+        }
+        self.scroll_where(f)
+    }
+
+    fn topic_member_count(&self, topic_id: &str) -> usize {
+        let mut f = content_filter();
+        f.must = Some(vec![match_cond("topic_id", topic_id)]);
+        if let Some(nots) = f.must_not.as_mut() {
+            nots.push(match_cond("kind", "doc_chunk"));
+        }
+        self.shard
+            .count(CountRequestBuilder::new().filter(f).exact(true).build())
+            .unwrap_or(0)
+    }
+
+    /// All non-empty topics with member counts, largest first.
+    pub fn list_topics(&self) -> Result<Vec<TopicInfo>> {
+        let mut out: Vec<TopicInfo> = Vec::new();
+        for t in self.list_kind(MemoryKind::Topic)? {
+            let members = self.topic_member_count(&t.id);
+            if members == 0 {
+                continue;
+            }
+            out.push(self.topic_info(&t, members));
+        }
+        out.sort_by(|a, b| b.members.cmp(&a.members).then_with(|| a.name.cmp(&b.name)));
+        Ok(out)
+    }
+
+    fn topic_info(&self, t: &Memory, members: usize) -> TopicInfo {
+        let user_named = self
+            .meta
+            .lock()
+            .map(|m| m.topic_state(&t.id).user_named)
+            .unwrap_or(false);
+        TopicInfo {
+            id: t.id.clone(),
+            name: t.title.clone(),
+            summary: topic_summary(t),
+            members,
+            user_named,
+            updated_at: t.updated_at.clone(),
+        }
+    }
+
+    /// Distill a topic's members into a rolling summary (and a better name,
+    /// unless the user named it). The summary becomes the topic node's text and
+    /// is EMBEDDED, so routing and query-time activation match what the subject
+    /// is actually about. Local LLM (Ollama).
+    pub fn refresh_topic(&self, topic_id: &str, model: &str) -> Result<TopicInfo> {
+        let mut topic = self
+            .get(topic_id)?
+            .filter(|m| m.kind == MemoryKind::Topic)
+            .ok_or_else(|| anyhow!("topic not found"))?;
+        let members = self.topic_members(topic_id)?;
+        if members.is_empty() {
+            return Err(anyhow!("topic has no members"));
+        }
+        let mut notes = String::new();
+        for m in &members {
+            let kind = kind_str(&m.kind);
+            let line = if m.kind == MemoryKind::Document {
+                format!("- [{kind}] {}: {}\n", m.title, truncate(&m.text, 320))
+            } else {
+                format!("- [{kind}] {}\n", truncate(&m.text, 320))
+            };
+            if notes.chars().count() + line.chars().count() > 3600 {
+                break;
+            }
+            notes.push_str(&line);
+        }
+        let system = "You maintain a personal knowledge base. Given the memories filed \
+under one subject, return ONLY JSON: {\"name\": \"a 2 to 4 word Title Case name for the \
+subject\", \"summary\": \"3 to 5 factual sentences on what the user knows, decided, and is \
+working on in this subject\"}. Keep the current name unless it is clearly inaccurate. Use \
+only the memories provided; do not invent facts.";
+        let prompt = format!("Current name: {}\nMemories:\n{notes}", topic.title);
+        let raw = self.ollama.generate(model, Some(system), &prompt, true)?;
+        let v: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| anyhow!("bad summary JSON: {e}"))?;
+        let summary = v["summary"].as_str().unwrap_or_default().trim().to_string();
+        if summary.is_empty() {
+            return Err(anyhow!("model returned an empty summary"));
+        }
+        let user_named = self
+            .meta
+            .lock()
+            .map(|m| m.topic_state(topic_id).user_named)
+            .unwrap_or(false);
+        if !user_named {
+            let name = clean_label(v["name"].as_str().unwrap_or_default());
+            if !name.is_empty() {
+                topic.title = name;
+            }
+        }
+        topic.text = truncate(&summary, 1200);
+        topic.updated_at = chrono::Utc::now().to_rfc3339();
+        self.upsert(&topic)?;
+        self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
+        if let Ok(mut m) = self.meta.lock() {
+            let _ = m.mark_topic_summarized(topic_id, &topic.updated_at);
+        }
+        Ok(self.topic_info(&topic, members.len()))
+    }
+
+    /// Refresh one topic's summary if it was never summarized or has gathered
+    /// at least `min_changes` new members since. Returns whether it refreshed.
+    pub fn refresh_topic_if_due(&self, topic_id: &str, model: &str, min_changes: u32) -> bool {
+        if model.trim().is_empty() {
+            return false;
+        }
+        let st = self
+            .meta
+            .lock()
+            .map(|m| m.topic_state(topic_id))
+            .unwrap_or_default();
+        let due = st.summarized_at.is_none() || st.changes_since_summary >= min_changes;
+        due && self.refresh_topic(topic_id, model).is_ok()
+    }
+
+    /// Refresh every due topic (most-changed first), at most `max`.
+    pub fn refresh_due_topics(&self, model: &str, min_changes: u32, max: usize) -> usize {
+        let Ok(topics) = self.list_kind(MemoryKind::Topic) else {
+            return 0;
+        };
+        let mut due: Vec<(String, u32)> = topics
+            .iter()
+            .filter_map(|t| {
+                let st = self.meta.lock().ok()?.topic_state(&t.id);
+                let is_due = st.summarized_at.is_none() || st.changes_since_summary >= min_changes;
+                is_due.then_some((t.id.clone(), st.changes_since_summary))
+            })
+            .collect();
+        due.sort_by(|a, b| b.1.cmp(&a.1));
+        due.into_iter()
+            .take(max)
+            .filter(|(id, _)| self.topic_member_count(id) > 0 && self.refresh_topic(id, model).is_ok())
+            .count()
+    }
+
+    /// User override: rename a topic. Automatic summaries keep this name.
+    pub fn rename_topic(&self, topic_id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("name cannot be empty"));
+        }
+        let mut t = self
+            .get(topic_id)?
+            .filter(|m| m.kind == MemoryKind::Topic)
+            .ok_or_else(|| anyhow!("topic not found"))?;
+        let unsummarized = topic_summary(&t).is_empty();
+        t.title = name.to_string();
+        if unsummarized {
+            t.text = name.to_string();
+        }
+        t.updated_at = chrono::Utc::now().to_rfc3339();
+        self.upsert(&t)?;
+        self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
+        if let Ok(mut m) = self.meta.lock() {
+            let _ = m.set_topic_user_named(topic_id);
+        }
+        Ok(())
+    }
+
+    /// User override: fold every member of `from` into `into`, then remove
+    /// `from`. Payload-only (no re-embedding).
+    pub fn merge_topics(&self, from: &str, into: &str) -> Result<()> {
+        if from == into {
+            return Err(anyhow!("cannot merge a topic into itself"));
+        }
+        for id in [from, into] {
+            self.get(id)?
+                .filter(|m| m.kind == MemoryKind::Topic)
+                .ok_or_else(|| anyhow!("topic not found"))?;
+        }
+        self.set_payload_where(
+            Filter {
+                must: Some(vec![match_cond("topic_id", from)]),
+                ..Default::default()
+            },
+            serde_json::json!({ "topic_id": into }),
+        )?;
+        if let Ok(mut g) = self.graph.lock() {
+            let _ = g.retarget_topic(from, into);
+        }
+        self.delete(from)?;
+        if let Ok(mut m) = self.meta.lock() {
+            let _ = m.remove_topic(from);
+            let _ = m.mark_topic_changed(into);
+        }
+        Ok(())
+    }
+
+    /// User override: file a memory (and a document's chunks) under a topic.
+    pub fn move_to_topic(&self, mem_id: &str, topic_id: &str) -> Result<()> {
+        self.get(topic_id)?
+            .filter(|m| m.kind == MemoryKind::Topic)
+            .ok_or_else(|| anyhow!("topic not found"))?;
+        let mem = self.get(mem_id)?.ok_or_else(|| anyhow!("memory not found"))?;
+        self.assign_topic(mem_id, topic_id, false);
+        if mem.kind == MemoryKind::Document {
+            self.set_payload_where(
+                Filter {
+                    must: Some(vec![match_cond("parent_id", mem_id)]),
+                    ..Default::default()
+                },
+                serde_json::json!({ "topic_id": topic_id }),
+            )?;
+        }
+        self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Organize existing memories: route every unfiled document/note into a
+    /// topic (oldest first, so subjects form in the order they were learned),
+    /// propagate to document chunks, summarize due topics, and drop empties.
+    pub fn organize(&self, model: &str) -> Result<OrganizeReport> {
+        let mut report = OrganizeReport::default();
+        let mut pending: Vec<Memory> = self
+            .list()?
+            .into_iter()
+            .filter(|m| {
+                m.topic_id.is_none()
+                    && !m.archived
+                    && !matches!(
+                        m.kind,
+                        MemoryKind::DocChunk | MemoryKind::Topic | MemoryKind::Entity | MemoryKind::Summary
+                    )
+            })
+            .collect();
+        pending.sort_by(|a, b| a.id.cmp(&b.id));
+        for m in &pending {
+            let topic = if m.kind == MemoryKind::Document {
+                let probe = self.document_probe(m);
+                let tid = if is_profile_title(&m.title) {
+                    self.profile_topic().ok().map(|t| {
+                        self.assign_topic(&m.id, &t, false);
+                        t
+                    })
+                } else {
+                    let hint = name_from_title(&m.title);
+                    self.route_and_assign_opts(&m.id, &probe, "", false, Some(&hint))
+                };
+                if let Some(t) = &tid {
+                    let _ = self.set_payload_where(
+                        Filter {
+                            must: Some(vec![match_cond("parent_id", &m.id)]),
+                            ..Default::default()
+                        },
+                        serde_json::json!({ "topic_id": t }),
+                    );
+                }
+                tid
+            } else {
+                self.route_and_assign_opts(&m.id, &m.text, "", false, None)
+            };
+            if topic.is_some() {
+                report.routed += 1;
+            }
+        }
+        self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
+        let _ = self.consolidate_topics();
+        if !model.trim().is_empty() {
+            report.summarized = self.refresh_due_topics(model, 1, 16);
+        }
+        let _ = self.prune_empty_topics();
+        report.topics = self.list_topics()?.len();
+        Ok(report)
+    }
+
+    /// Text that represents a stored document for routing: its first chunks.
+    fn document_probe(&self, doc: &Memory) -> String {
+        let mut chunks = self
+            .scroll_where(Filter {
+                must: Some(vec![match_cond("parent_id", &doc.id)]),
+                ..Default::default()
+            })
+            .unwrap_or_default();
+        chunks.sort_by_key(|c| chunk_index(&c.title));
+        let mut probe = doc.text.clone();
+        for c in chunks.iter().take(2) {
+            probe.push('\n');
+            probe.push_str(&c.text);
+        }
+        probe
+    }
+
+    /// Topic consolidation (re-homing). Online routing is order-dependent: the
+    /// first note of a subject can arrive before anything similar is filed and
+    /// found its own topic. As knowledge grows, members of small topics (<= 2)
+    /// are re-examined and moved to an established topic when their filed
+    /// neighbours there now clearly claim them (two neighbours, or one very
+    /// strong one, and more support than their current topic). Note-only
+    /// singletons are processed first so they move toward document-anchored
+    /// subjects. User-named topics and the Profile topic are never touched.
+    /// Deterministic, no LLM. Returns how many memories moved.
+    pub fn consolidate_topics(&self) -> Result<usize> {
+        let t = self.tuning;
+        let mut small: Vec<(String, usize, bool)> = Vec::new();
+        for topic in self.list_kind(MemoryKind::Topic)? {
+            if topic.tags.iter().any(|x| x == "profile") {
+                continue;
+            }
+            let user_named = self
+                .meta
+                .lock()
+                .map(|m| m.topic_state(&topic.id).user_named)
+                .unwrap_or(false);
+            if user_named {
+                continue;
+            }
+            let members = self.topic_members(&topic.id)?;
+            if members.is_empty() || members.len() > 2 {
+                continue;
+            }
+            let has_doc = members.iter().any(|m| m.kind == MemoryKind::Document);
+            small.push((topic.id, members.len(), has_doc));
+        }
+        small.sort_by_key(|(_, n, has_doc)| (*n, *has_doc));
+
+        let mut moved = 0;
+        for (tid, _, _) in small {
+            for m in self.topic_members(&tid)? {
+                let probe = if m.kind == MemoryKind::Document {
+                    self.document_probe(&m)
+                } else {
+                    m.text.clone()
+                };
+                let (dense, _) = self.embedders.embed_query(&truncate(&probe, 2000))?;
+                let mut votes: HashMap<String, (f32, f32, usize)> = HashMap::new();
+                for h in self.query_points(&dense, None, Some(content_filter()), 12)? {
+                    if h.memory.id == m.id || h.memory.parent_id.as_deref() == Some(&m.id) {
+                        continue;
+                    }
+                    if h.score < t.topic_join {
+                        continue;
+                    }
+                    if let Some(other) = h.memory.topic_id {
+                        let e = votes.entry(other).or_insert((0.0, 0.0, 0));
+                        e.0 += h.score;
+                        e.1 = e.1.max(h.score);
+                        e.2 += 1;
+                    }
+                }
+                // Summarized topics vote as themselves: a rolling summary is
+                // strong evidence of what the subject covers.
+                for h in self.query_points(&dense, None, Some(kind_filter(MemoryKind::Topic)), 3)? {
+                    if h.memory.id != tid
+                        && !topic_summary(&h.memory).is_empty()
+                        && h.score >= t.topic_join_direct
+                    {
+                        let e = votes.entry(h.memory.id).or_insert((0.0, 0.0, 0));
+                        e.0 += h.score;
+                        e.1 = e.1.max(h.score);
+                        e.2 += 1;
+                    }
+                }
+                let own = votes.get(&tid).map(|v| v.0).unwrap_or(0.0);
+                let best = votes
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != tid)
+                    .max_by(|a, b| a.1 .0.partial_cmp(&b.1 .0).unwrap_or(std::cmp::Ordering::Equal));
+                if let Some((dest, (sum, max, n))) = best {
+                    let claimed = *n >= 2 || *max >= t.topic_join + 0.15;
+                    if claimed && *sum > own {
+                        let dest = dest.clone();
+                        self.move_to_topic(&m.id, &dest)?;
+                        moved += 1;
+                    }
+                }
+            }
+        }
+        if moved > 0 {
+            let _ = self.prune_empty_topics();
+        }
+        Ok(moved)
+    }
+
+    /// Remove topics that no longer have members (after merges/moves).
+    pub fn prune_empty_topics(&self) -> Result<usize> {
+        let mut n = 0;
+        for t in self.list_kind(MemoryKind::Topic)? {
+            if self.topic_member_count(&t.id) == 0 {
+                self.delete(&t.id)?;
+                if let Ok(mut m) = self.meta.lock() {
+                    let _ = m.remove_topic(&t.id);
+                }
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Payload-only update of every point matching `filter`.
+    fn set_payload_where(&self, filter: Filter, fields: serde_json::Value) -> Result<()> {
+        let payload: Payload =
+            serde_json::from_value(fields).context("invalid payload fields")?;
+        self.shard
+            .update(UpdateOperation::PayloadOperation(PayloadOps::SetPayload(
+                SetPayloadOp {
+                    payload,
+                    points: None,
+                    filter: Some(filter),
+                    key: None,
+                },
+            )))
+            .map_err(|e| anyhow!("set payload failed: {e}"))?;
+        Ok(())
     }
 
     /// Generate a short topic label from content (fast model; heuristic fallback).
@@ -523,24 +1096,38 @@ no explanation.";
             return Err(anyhow!("no extractable text in '{filename}'"));
         }
         let preview: String = text.chars().take(400).collect();
-        let doc = self.add(NewMemory {
-            kind: MemoryKind::Document,
-            title: filename.to_string(),
-            text: preview,
-            site_id: String::new(),
-            asset_id: String::new(),
-            geo: None,
-            tags: Vec::new(),
-            source: MemorySource::File,
-            sensitivity: Sensitivity::Shareable,
-            parent_id: None,
-            topic_id: None,
-            due_at: None,
-        })?;
+        // Everything below is written without intermediate flushes; one flush
+        // after the chunk batch makes the whole document durable at once.
+        let doc = self.add_opts(
+            NewMemory {
+                kind: MemoryKind::Document,
+                title: filename.to_string(),
+                text: preview,
+                site_id: String::new(),
+                asset_id: String::new(),
+                geo: None,
+                tags: Vec::new(),
+                source: MemorySource::File,
+                sensitivity: Sensitivity::Shareable,
+                parent_id: None,
+                topic_id: None,
+                due_at: None,
+            },
+            false,
+        )?;
 
         // Route the document to a topic (schema layer), then file its chunks
-        // under the same topic so a research effort stays coherent.
-        let doc_topic = self.route_and_assign(&doc.id, text, entity_model);
+        // under the same topic so a research effort stays coherent. Identity
+        // documents always go to the dedicated Profile topic.
+        let doc_topic = if is_profile_title(filename) {
+            self.profile_topic().ok().map(|tid| {
+                self.assign_topic(&doc.id, &tid, false);
+                tid
+            })
+        } else {
+            let hint = name_from_title(filename);
+            self.route_and_assign_opts(&doc.id, text, entity_model, false, Some(&hint))
+        };
 
         // Chunks are stored in ONE batch: a single batched embedding call, one
         // upsert, one flush, and one edge-file write (instead of per chunk).
@@ -788,6 +1375,7 @@ no explanation.";
                 },
                 kind: kind_str(&m.kind),
                 parent_id: m.parent_id.clone(),
+                topic_id: m.topic_id.clone(),
                 salience: m.salience,
             })
             .collect();
@@ -799,7 +1387,12 @@ no explanation.";
             .into_iter()
             .filter(|e| active.contains(&e.from) && active.contains(&e.to))
             .collect();
-        Ok(GraphData { nodes, edges })
+        let archived = memories.iter().filter(|m| m.archived).count();
+        Ok(GraphData {
+            nodes,
+            edges,
+            archived,
+        })
     }
 
     // ---- consolidation, decay, maintenance ------------------------------
@@ -929,6 +1522,10 @@ no explanation.";
     pub fn run_maintenance(&self, model: &str) -> Result<MaintenanceReport> {
         let summaries = self.consolidate(model)?;
         let _ = self.decay()?;
+        // Re-home stragglers, then refresh subjects that gathered new members.
+        let topics_rehomed = self.consolidate_topics().unwrap_or(0);
+        let topics_summarized = self.refresh_due_topics(model, 3, 12);
+        let _ = self.prune_empty_topics();
         let existing: std::collections::HashSet<String> =
             self.list()?.iter().map(|m| m.id.clone()).collect();
         if let Ok(mut meta) = self.meta.lock() {
@@ -944,6 +1541,8 @@ no explanation.";
             summaries,
             archived,
             active,
+            topics_summarized,
+            topics_rehomed,
         })
     }
 
@@ -1067,117 +1666,214 @@ no explanation.";
         })
     }
 
-    /// Retrieval for chat. Deterministic and testable:
-    ///   1. Base hybrid semantic search over everything.
-    ///   2. Personal-context injection: a self-referential question ("best
-    ///      internships for me", "what are my strengths") always pulls chunks
-    ///      from the user's PROFILE documents (resume / CV / about-me), so their
-    ///      own background grounds the answer even when the question shares no
-    ///      vocabulary with the resume.
-    ///   3. Named-document injection: naming a document ("check my resume",
-    ///      "the study guide") pulls that document's chunks in directly.
-    /// Injected chunks lead the context; the rest fills the remaining slots.
+    /// Chat retrieval: ranked evidence for `query` (see `retrieve_context`).
     pub fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let base = self
-            .search(SearchRequest {
-                query: query.to_string(),
-                mode: SearchMode::Hybrid,
-                limit,
-                site_id: None,
-                kind: None,
-            })?
-            .results;
-
-        // Which documents to pull directly: the user's profile for personal
-        // questions, plus any document the query names by title.
-        let mut inject_docs: Vec<String> = Vec::new();
-        if is_self_referential(query) {
-            inject_docs.extend(self.profile_documents().unwrap_or_default());
-        }
-        inject_docs.extend(self.referenced_documents(query).unwrap_or_default());
-        inject_docs.sort();
-        inject_docs.dedup();
-
-        if inject_docs.is_empty() {
-            return Ok(base);
-        }
-
-        let (dense, sparse) = self.embedders.embed_query(query)?;
-        let per_doc = if inject_docs.len() == 1 { 4 } else { 2 };
-        let mut injected: Vec<SearchResult> = Vec::new();
-        for doc_id in &inject_docs {
-            if let Ok(hits) = self.search_in_doc(&dense, &sparse, doc_id, per_doc) {
-                injected.extend(hits);
-            }
-        }
-
-        // Injected (profile / named-doc) chunks first, then semantic results.
-        let mut seen = std::collections::HashSet::new();
-        let mut merged: Vec<SearchResult> = Vec::new();
-        for r in injected.into_iter().chain(base.into_iter()) {
-            if seen.insert(r.memory.id.clone()) {
-                merged.push(r);
-            }
-        }
-        merged.truncate(limit);
-        Ok(merged)
+        Ok(self.retrieve_context(query, limit)?.results)
     }
 
-    /// Documents that describe the user themselves (resume / CV / about-me),
-    /// used to ground answers to personal questions.
+    /// Topic-aware retrieval (schema first, then details — how recall works):
+    ///   1. Base: hybrid dense + BM25 search over content (hubs excluded).
+    ///   2. Activate topics: the subjects the evidence belongs to (rank-weighted
+    ///      votes from the base hits) plus direct matches on topic nodes.
+    ///   3. Pull the members of each active topic (a note that shares no words
+    ///      with the query still surfaces when its subject is active).
+    ///   4. Documents the query names ("my resume", "coresum", "HCMA"), and the
+    ///      user's profile for questions about the user as a person.
+    ///   5. Weighted reciprocal-rank fusion of all lists; when one subject
+    ///      clearly owns the query, results outside it are demoted.
+    ///   6. Per-document diversity cap. Scores are normalized to [0, 1].
+    pub fn retrieve_context(&self, query: &str, limit: usize) -> Result<RetrievalContext> {
+        let t = self.tuning;
+        let (dense, sparse) = self.embedders.embed_query(query)?;
+        let pool = (limit * 5).max(30);
+
+        let base = self.query_points(&dense, Some(&sparse), Some(content_filter()), pool)?;
+        let active = self.activate_topics(&dense, &base);
+        let active_ids: std::collections::HashSet<&str> =
+            active.iter().map(|a| a.0.as_str()).collect();
+
+        // The strongest direct evidence is never demoted by a topic vote: a
+        // precise hit ("5k") must not lose to many weak same-topic matches.
+        let protected: Vec<String> = base.iter().take(2).map(|r| r.memory.id.clone()).collect();
+        let top_hit: Option<SearchResult> = base.first().cloned();
+
+        // (ranked list, fusion weight, anchored = exempt from off-topic demotion)
+        let mut lists: Vec<(Vec<SearchResult>, f32, bool)> = vec![(base, 1.0, false)];
+        for (tid, share) in &active {
+            let mut f = content_filter();
+            f.must = Some(vec![match_cond("topic_id", tid)]);
+            if let Ok(members) = self.query_points(&dense, Some(&sparse), Some(f), limit * 2) {
+                lists.push((members, t.topic_weight * share, false));
+            }
+        }
+        let named = self.referenced_documents(query).unwrap_or_default();
+        for d in &named {
+            if let Ok(h) = self.search_in_doc(&dense, &sparse, d, 4) {
+                lists.push((h, t.named_weight, true));
+            }
+        }
+        if needs_profile(query) {
+            for d in self.profile_documents().unwrap_or_default() {
+                if named.contains(&d) {
+                    continue;
+                }
+                if let Ok(h) = self.search_in_doc(&dense, &sparse, &d, 3) {
+                    lists.push((h, t.profile_weight, true));
+                }
+            }
+        }
+
+        // Weighted reciprocal-rank fusion.
+        let mut fused: HashMap<String, f32> = HashMap::new();
+        let mut anchored: std::collections::HashSet<String> = protected.into_iter().collect();
+        let mut best: HashMap<String, SearchResult> = HashMap::new();
+        for (list, w, anchor) in lists {
+            for (rank, r) in list.into_iter().enumerate() {
+                *fused.entry(r.memory.id.clone()).or_insert(0.0) +=
+                    w / (t.rrf_k + rank as f32 + 1.0);
+                if anchor {
+                    anchored.insert(r.memory.id.clone());
+                }
+                best.entry(r.memory.id.clone()).or_insert(r);
+            }
+        }
+
+        let focused = active.first().map(|a| a.1 >= t.focus_conf).unwrap_or(false);
+        let mut ranked: Vec<SearchResult> = best
+            .into_values()
+            .map(|mut r| {
+                let mut s = fused.get(&r.memory.id).copied().unwrap_or(0.0);
+                if focused && !anchored.contains(&r.memory.id) {
+                    let on_topic = r
+                        .memory
+                        .topic_id
+                        .as_deref()
+                        .map(|x| active_ids.contains(x))
+                        .unwrap_or(false);
+                    if !on_topic {
+                        s *= t.offtopic_penalty;
+                    }
+                }
+                // Salience only breaks near-ties.
+                r.score = s * (1.0 + 0.05 * r.memory.salience);
+                r
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        let mut results = diversify(ranked, limit, t.per_doc_cap);
+        // Guarantee the single best raw hit a slot: fusion may reorder evidence
+        // but must never drop the strongest direct match entirely.
+        if let Some(top) = top_hit {
+            if !results.iter().any(|r| r.memory.id == top.memory.id) {
+                if results.len() >= limit {
+                    results.pop();
+                }
+                let s = results.last().map(|r| r.score).unwrap_or(0.0);
+                results.push(SearchResult { score: s, ..top });
+            }
+        }
+        if let Some(top) = results.first().map(|r| r.score).filter(|s| *s > 0.0) {
+            for r in &mut results {
+                r.score /= top;
+            }
+        }
+
+        let topics = active
+            .iter()
+            .filter_map(|(tid, share)| {
+                let m = self.get(tid).ok().flatten()?;
+                Some(TopicHit {
+                    id: tid.clone(),
+                    summary: topic_summary(&m),
+                    name: m.title,
+                    confidence: *share,
+                })
+            })
+            .collect();
+        Ok(RetrievalContext { results, topics })
+    }
+
+    /// Which subjects does this query belong to? Base hits vote for their topic
+    /// (rank-weighted), and topic nodes that match the query directly add to the
+    /// vote. Returns up to two topics with their share of the vote, strongest
+    /// first, filtered by `activation_min`.
+    fn activate_topics(&self, dense: &[f32], base: &[SearchResult]) -> Vec<(String, f32)> {
+        let t = self.tuning;
+        // Votes decay with the square of rank: the subject of the BEST evidence
+        // wins, not the subject with the most (weak) matches.
+        let mut vote: HashMap<String, f32> = HashMap::new();
+        for (i, r) in base.iter().take(12).enumerate() {
+            if let Some(tid) = &r.memory.topic_id {
+                *vote.entry(tid.clone()).or_insert(0.0) += 1.0 / ((i + 1) * (i + 1)) as f32;
+            }
+        }
+        if let Ok(hits) = self.query_points(dense, None, Some(kind_filter(MemoryKind::Topic)), 3) {
+            for h in hits {
+                if h.score >= t.topic_join_direct {
+                    *vote.entry(h.memory.id).or_insert(0.0) += 0.2 + (h.score - t.topic_join_direct);
+                }
+            }
+        }
+        let total: f32 = vote.values().sum();
+        if total <= 0.0 {
+            return Vec::new();
+        }
+        let mut v: Vec<(String, f32)> = vote.into_iter().map(|(k, x)| (k, x / total)).collect();
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v.into_iter().filter(|(_, s)| *s >= t.activation_min).take(2).collect()
+    }
+
+    /// One memory by id (None if missing or deleted).
+    pub fn get(&self, id: &str) -> Result<Option<Memory>> {
+        let req = RetrieveRequestBuilder::new(vec![point_id(id)?])
+            .with_payload(WithPayloadInterface::Bool(true))
+            .build();
+        let recs = self
+            .shard
+            .retrieve(req)
+            .map_err(|e| anyhow!("retrieve failed: {e}"))?;
+        let tomb = self.meta.lock().map(|m| m.is_tombstoned(id)).unwrap_or(false);
+        if tomb {
+            return Ok(None);
+        }
+        Ok(recs.into_iter().find_map(|r| memory_from_payload(r.payload.as_ref())))
+    }
+
+    /// Documents that describe the user themselves (resume / CV / about-me).
     fn profile_documents(&self) -> Result<Vec<String>> {
-        const PROFILE_HINTS: &[&str] = &[
-            "resume", "resumé", "résumé", "cv", "curriculum vitae", "curriculum-vitae",
-            "about me", "about-me", "aboutme", "profile", "bio", "biodata",
-        ];
         Ok(self
             .list_documents()?
             .into_iter()
-            .filter(|m| {
-                let t = m.title.to_lowercase();
-                PROFILE_HINTS.iter().any(|h| {
-                    // Match "cv" only as a whole word so "service.pdf" doesn't hit.
-                    if *h == "cv" {
-                        t.split(|c: char| !c.is_alphanumeric()).any(|w| w == "cv")
-                    } else {
-                        t.contains(h)
-                    }
-                })
-            })
+            .filter(|m| is_profile_title(&m.title))
             .map(|m| m.id)
             .collect())
     }
 
-    /// Documents whose title is referenced by the query (word overlap).
+    /// Documents the query refers to by name. Matching is on whole tokens (no
+    /// substrings: "for" must not match "In-for-med"), with compound joins
+    /// ("core-sum" -> "coresum", "study guide" -> "studyguide") and title
+    /// acronyms ("HCMA"). Short, name-like titles need one matching token; long
+    /// descriptive titles need two. More than two hits = no specific reference.
     fn referenced_documents(&self, query: &str) -> Result<Vec<String>> {
-        let q = query.to_lowercase();
-        let qwords: std::collections::HashSet<String> = q
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.len() >= 3)
-            .map(String::from)
-            .collect();
-        if qwords.is_empty() {
+        let qtok = query_tokens(query);
+        if qtok.is_empty() {
             return Ok(Vec::new());
         }
-        const STOP: &[&str] = &[
-            "pdf", "doc", "docx", "txt", "the", "and", "for", "file", "final", "copy", "new",
-            "old", "version", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
-            "oct", "nov", "dec",
-        ];
         let mut refs = Vec::new();
         for m in self.list_documents()? {
-            let title = m.title.to_lowercase();
-            let matched = title
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|w| w.len() >= 3 && !STOP.contains(w) && !w.chars().all(|c| c.is_numeric()))
-                .any(|tw| {
-                    qwords
-                        .iter()
-                        .any(|qw| tw.contains(qw.as_str()) || qw.contains(tw))
-                });
-            if matched {
+            let tt = title_tokens(&m.title);
+            if tt.is_empty() {
+                continue;
+            }
+            let hits = tt.iter().filter(|w| qtok.contains(*w)).count();
+            let acronym = title_acronym_hit(&tt, &qtok);
+            let needed = if tt.len() <= 3 { 1 } else { 2 };
+            if acronym || hits >= needed {
                 refs.push(m.id);
             }
+        }
+        if refs.len() > 2 {
+            return Ok(Vec::new());
         }
         Ok(refs)
     }
@@ -1190,35 +1886,56 @@ no explanation.";
         doc_id: &str,
         top: usize,
     ) -> Result<Vec<SearchResult>> {
-        let filter = Filter {
-            must: Some(vec![Condition::Field(FieldCondition::new_match(
-                jpath("parent_id"),
-                Match::from(doc_id.to_string()),
-            ))]),
+        let f = Filter {
+            must: Some(vec![match_cond("parent_id", doc_id)]),
             ..Default::default()
         };
-        let builder = QueryRequestBuilder::new(top)
-            .with_payload(WithPayloadInterface::Bool(true))
-            .add_prefetch(
-                PrefetchBuilder::new(PREFETCH_LIMIT)
-                    .query(nearest(DENSE_NAME, VectorInternal::Dense(dense.to_vec())))
-                    .filter(filter.clone())
-                    .build(),
-            )
-            .add_prefetch(
-                PrefetchBuilder::new(PREFETCH_LIMIT)
-                    .query(nearest(SPARSE_NAME, VectorInternal::Sparse(sparse.clone())))
-                    .filter(filter.clone())
-                    .build(),
-            )
-            .query(ScoringQuery::Fusion(Fusion::Rrf {
-                k: 60,
-                weights: None,
-            }));
+        self.query_points(dense, Some(sparse), Some(f), top)
+    }
+
+    /// Core vector query. Hybrid (dense + BM25 sparse, fused with RRF) when
+    /// `sparse` is given, dense-only otherwise; `filter` applies to every stage.
+    /// Results are hydrated (archived/tombstoned dropped, live salience set) and
+    /// carry raw scores (cosine for dense-only).
+    fn query_points(
+        &self,
+        dense: &[f32],
+        sparse: Option<&qdrant_edge::SparseVector>,
+        filter: Option<Filter>,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let mut builder =
+            QueryRequestBuilder::new(limit).with_payload(WithPayloadInterface::Bool(true));
+        builder = match sparse {
+            Some(sp) => {
+                let mut pd = PrefetchBuilder::new(PREFETCH_LIMIT)
+                    .query(nearest(DENSE_NAME, VectorInternal::Dense(dense.to_vec())));
+                let mut ps = PrefetchBuilder::new(PREFETCH_LIMIT)
+                    .query(nearest(SPARSE_NAME, VectorInternal::Sparse(sp.clone())));
+                if let Some(f) = &filter {
+                    pd = pd.filter(f.clone());
+                    ps = ps.filter(f.clone());
+                }
+                builder
+                    .add_prefetch(pd.build())
+                    .add_prefetch(ps.build())
+                    .query(ScoringQuery::Fusion(Fusion::Rrf {
+                        k: 60,
+                        weights: None,
+                    }))
+            }
+            None => {
+                let b = builder.query(nearest(DENSE_NAME, VectorInternal::Dense(dense.to_vec())));
+                match &filter {
+                    Some(f) => b.filter(f.clone()),
+                    None => b,
+                }
+            }
+        };
         let scored = self
             .shard
             .query(builder.build())
-            .map_err(|e| anyhow!("doc query failed: {e}"))?;
+            .map_err(|e| anyhow!("query failed: {e}"))?;
         Ok(self.hydrate(
             scored
                 .into_iter()
@@ -1255,15 +1972,14 @@ no explanation.";
     /// All live memories of one kind, via the indexed `kind` payload filter
     /// (avoids scrolling and deserializing the whole store).
     pub fn list_kind(&self, kind: MemoryKind) -> Result<Vec<Memory>> {
+        self.scroll_where(kind_filter(kind))
+    }
+
+    /// Live memories matching a payload filter (indexed), newest first.
+    fn scroll_where(&self, filter: Filter) -> Result<Vec<Memory>> {
         let req = ScrollRequestBuilder::new()
             .limit(SCROLL_ALL_LIMIT)
-            .filter(Filter {
-                must: Some(vec![Condition::Field(FieldCondition::new_match(
-                    jpath("kind"),
-                    Match::from(kind_str(&kind)),
-                ))]),
-                ..Default::default()
-            })
+            .filter(filter)
             .with_payload(WithPayloadInterface::Bool(true))
             .build();
         let (records, _next) = self
@@ -1366,14 +2082,243 @@ fn jpath(field: &str) -> JsonPath {
     field.parse().expect("valid payload field path")
 }
 
-/// Clean a model's topic-label reply: first non-empty line, quotes/punctuation
-/// stripped, capped at 5 words.
+fn match_cond(field: &str, value: &str) -> Condition {
+    Condition::Field(FieldCondition::new_match(jpath(field), Match::from(value.to_string())))
+}
+
+/// Content only: excludes organizing hubs (entity names, topic nodes).
+fn content_filter() -> Filter {
+    Filter {
+        must_not: Some(vec![match_cond("kind", "entity"), match_cond("kind", "topic")]),
+        ..Default::default()
+    }
+}
+
+fn kind_filter(kind: MemoryKind) -> Filter {
+    Filter {
+        must: Some(vec![match_cond("kind", &kind_str(&kind))]),
+        ..Default::default()
+    }
+}
+
+/// Keep at most `cap` results per source document, then truncate to `limit`.
+/// Over-cap results only fill slots left over, so one document can't
+/// monopolize the context.
+fn diversify(results: Vec<SearchResult>, limit: usize, cap: usize) -> Vec<SearchResult> {
+    let mut per_doc: HashMap<String, usize> = HashMap::new();
+    let mut primary: Vec<SearchResult> = Vec::new();
+    let mut overflow: Vec<SearchResult> = Vec::new();
+    for r in results {
+        let key = r.memory.parent_id.clone().unwrap_or_else(|| r.memory.id.clone());
+        let c = per_doc.entry(key).or_insert(0);
+        if *c < cap {
+            *c += 1;
+            primary.push(r);
+        } else {
+            overflow.push(r);
+        }
+    }
+    primary.extend(overflow);
+    primary.truncate(limit);
+    primary
+}
+
+/// Position of a chunk within its document, from its "name [n]" title.
+fn chunk_index(title: &str) -> usize {
+    title
+        .rsplit('[')
+        .next()
+        .and_then(|s| s.trim_end_matches(']').trim().parse().ok())
+        .unwrap_or(usize::MAX)
+}
+
+/// A topic node's rolling summary ("" until one has been written; the node's
+/// text equals its name before that).
+fn topic_summary(m: &Memory) -> String {
+    if m.text.trim() == m.title.trim() {
+        String::new()
+    } else {
+        m.text.clone()
+    }
+}
+
+/// Is this document about the user themselves (resume / CV / about-me)?
+fn is_profile_title(title: &str) -> bool {
+    let t = title.to_lowercase();
+    const HINTS: &[&str] = &[
+        "resume", "resumé", "résumé", "curriculum vitae", "curriculum-vitae", "about me",
+        "about-me", "aboutme", "biodata",
+    ];
+    HINTS.iter().any(|h| t.contains(h))
+        || t
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == "cv" || w == "bio" || w == "profile")
+}
+
+/// Should the user's profile ground this answer? Only for questions about the
+/// user AS A PERSON:
+///   - person cues: "my strengths", "my skills", "my projects", "my background";
+///   - fit questions: an evaluative word + a career word ("best internships for
+///     me", "what jobs suit me", "should I apply to this role").
+/// Not for procedures ("how do I keep my F-1 status while working an
+/// internship", "when can I apply for OPT") and not for every "my" ("what is my
+/// coresum score" is about CoreSum).
+fn needs_profile(query: &str) -> bool {
+    if !is_self_referential(query) {
+        return false;
+    }
+    const PERSON: &[&str] = &[
+        "skill", "skills", "strength", "strengths", "weakness", "weaknesses", "experience",
+        "background", "education", "qualified", "qualification", "qualifications", "resume",
+        "cv", "profile", "portfolio", "expertise", "achievements", "projects",
+        "accomplishments",
+    ];
+    const CAREER: &[&str] = &[
+        "intern", "internship", "internships", "job", "jobs", "career", "careers", "role",
+        "roles", "position", "positions", "company", "companies", "program", "programs",
+        "major", "field", "fields", "path",
+    ];
+    const EVAL: &[&str] = &[
+        "best", "suit", "suits", "suited", "fit", "fits", "good", "right", "recommend",
+        "match", "matches", "ideal", "should",
+    ];
+    let lower = query.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).collect();
+    let has = |set: &[&str]| words.iter().any(|w| set.contains(w));
+    has(PERSON) || (has(CAREER) && has(EVAL))
+}
+
+/// Filler words that never identify a document by title.
+const GENERIC_TITLE_WORDS: &[&str] = &[
+    "pdf", "doc", "docx", "txt", "md", "the", "and", "for", "with", "from", "into", "file",
+    "files", "final", "copy", "new", "old", "version", "draft", "notes", "note", "document",
+    "documents", "report", "paper", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug",
+    "sep", "sept", "oct", "nov", "dec", "january", "february", "march", "april", "june",
+    "july", "august", "september", "october", "november", "december",
+];
+
+/// Identifying tokens of a document title, in order.
+fn title_tokens(title: &str) -> Vec<String> {
+    title
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| {
+            w.chars().count() >= 3
+                && !w.chars().all(|c| c.is_ascii_digit())
+                && !GENERIC_TITLE_WORDS.contains(w)
+        })
+        .map(String::from)
+        .collect()
+}
+
+/// Query tokens plus adjacent-pair joins, so "core-sum" also yields "coresum"
+/// and "study guide" also yields "studyguide".
+fn query_tokens(query: &str) -> std::collections::HashSet<String> {
+    let words: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(String::from)
+        .collect();
+    let mut out: std::collections::HashSet<String> = words.iter().cloned().collect();
+    for pair in words.windows(2) {
+        out.insert(format!("{}{}", pair[0], pair[1]));
+    }
+    out
+}
+
+/// Does the query use the title's acronym ("HCMA" for "Hierarchical Cognitive
+/// Memory Architecture ...")? Prefixes of 4+ letters count; a 3-letter acronym
+/// must match exactly.
+fn title_acronym_hit(tt: &[String], qtok: &std::collections::HashSet<String>) -> bool {
+    let acr: String = tt.iter().filter_map(|w| w.chars().next()).collect();
+    let n = acr.chars().count();
+    if n < 3 {
+        return false;
+    }
+    if n == 3 {
+        return qtok.contains(&acr);
+    }
+    (4..=n).any(|len| qtok.contains(&acr.chars().take(len).collect::<String>()))
+}
+
+/// Normalize a topic label (from a model or a file name): first non-empty line,
+/// quotes/punctuation stripped, at most 4 words, no dangling connector words
+/// ("... Architecture for"), and shouting converted to Title Case (short
+/// acronyms like TCS / OPT are kept).
 fn clean_label(s: &str) -> String {
+    const CONNECTORS: &[&str] = &["for", "and", "of", "the", "in", "on", "with", "to", "a", "an", "&"];
     let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     let cleaned = line.trim_matches(|c: char| {
         c == '"' || c == '\'' || c == '.' || c == ':' || c == '-' || c == '*' || c == '#'
     });
-    cleaned.split_whitespace().take(5).collect::<Vec<_>>().join(" ")
+    let mut words: Vec<&str> = cleaned.split_whitespace().take(4).collect();
+    while words
+        .last()
+        .map(|w| CONNECTORS.contains(&w.to_lowercase().as_str()))
+        .unwrap_or(false)
+    {
+        words.pop();
+    }
+    let letters: String = words.concat().chars().filter(|c| c.is_alphabetic()).collect();
+    let shouting = letters.chars().count() > 4 && letters.chars().all(|c| c.is_uppercase());
+    words
+        .iter()
+        .map(|w| {
+            if shouting && w.chars().count() > 3 {
+                title_word(w)
+            } else {
+                w.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn title_word(w: &str) -> String {
+    let mut cs = w.chars();
+    match cs.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + &cs.as_str().to_lowercase(),
+        None => String::new(),
+    }
+}
+
+/// A topic name from a document's file name: "Usa_StudyGuide.pdf" ->
+/// "Usa Study Guide", "Weeknight Recipes.txt" -> "Weeknight Recipes". Drops the
+/// extension, dates, and version noise. No LLM needed; the rolling summary may
+/// refine it later.
+fn name_from_title(title: &str) -> String {
+    let stem = match title.rsplit_once('.') {
+        Some((s, ext)) if ext.len() <= 5 && !ext.contains(' ') => s,
+        _ => title,
+    };
+    // Split camelCase ("StudyGuide" -> "Study Guide") and separators.
+    let mut spaced = String::new();
+    let mut prev_lower = false;
+    for c in stem.chars() {
+        if c.is_uppercase() && prev_lower {
+            spaced.push(' ');
+        }
+        prev_lower = c.is_lowercase();
+        spaced.push(if c.is_alphanumeric() { c } else { ' ' });
+    }
+    let words: Vec<String> = spaced
+        .split_whitespace()
+        .filter(|w| {
+            let l = w.to_lowercase();
+            !w.chars().all(|c| c.is_ascii_digit())
+                && !GENERIC_TITLE_WORDS.contains(&l.as_str())
+                && l != "v"
+        })
+        .map(|w| {
+            if w.chars().all(|c| c.is_lowercase()) {
+                title_word(w)
+            } else {
+                w.to_string()
+            }
+        })
+        .collect();
+    clean_label(&words.join(" "))
 }
 
 /// Fallback topic label: the first few significant words of the content, in
@@ -1530,7 +2475,54 @@ mod tests {
     fn labels_are_cleaned() {
         assert_eq!(clean_label("\"Exoplanet Transit Research\"\n"), "Exoplanet Transit Research");
         assert_eq!(clean_label("\n\n**Piano Practice**."), "Piano Practice");
-        assert_eq!(clean_label("one two three four five six seven").split(' ').count(), 5);
+        assert_eq!(clean_label("one two three four five six seven").split(' ').count(), 4);
+        assert_eq!(clean_label("VIDEO QUALITY ISSUES"), "Video Quality Issues");
+        assert_eq!(clean_label("TCS GAP ANALYSIS"), "TCS GAP Analysis");
+        assert_eq!(
+            clean_label("Hierarchical Cognitive Memory Architecture for Hybrid"),
+            "Hierarchical Cognitive Memory Architecture"
+        );
+        assert_eq!(clean_label("Memory Architecture for"), "Memory Architecture");
+    }
+
+    #[test]
+    fn document_titles_become_topic_names() {
+        use super::name_from_title;
+        assert_eq!(name_from_title("Usa_StudyGuide.pdf"), "Usa Study Guide");
+        assert_eq!(name_from_title("Weeknight Recipes.txt"), "Weeknight Recipes");
+        assert_eq!(name_from_title("coresum.pdf"), "Coresum");
+        assert_eq!(name_from_title("Resume (Aug 2026) (1).pdf"), "Resume");
+    }
+
+    #[test]
+    fn profile_only_for_questions_about_the_person() {
+        use super::needs_profile;
+        assert!(needs_profile("what type of internships are best for me?"));
+        assert!(needs_profile("what are my strengths as an engineer?"));
+        assert!(needs_profile("tell me about my projects"));
+        assert!(needs_profile("which jobs suit me"));
+        // Procedures and topical "my" are not about the person.
+        assert!(!needs_profile("how do I keep my F-1 status while working an internship?"));
+        assert!(!needs_profile("what is OPT and when can I apply?"));
+        assert!(!needs_profile("what is my coresum TCS score right now?"));
+        assert!(!needs_profile("how fast is my 5k?"));
+    }
+
+    #[test]
+    fn document_references_use_whole_tokens() {
+        use super::{query_tokens, title_acronym_hit, title_tokens};
+        // "for" must not match "In-for-med".
+        let tt = title_tokens("Physics-Informed Transit Detection.pdf");
+        assert!(!tt.iter().any(|w| query_tokens("internships best for me").contains(w)));
+        // Compound joins.
+        assert!(query_tokens("benchmarks for core-sum").contains("coresum"));
+        assert!(query_tokens("the study guide").contains("studyguide"));
+        assert_eq!(title_tokens("Usa_StudyGuide.pdf"), vec!["usa", "studyguide"]);
+        assert_eq!(title_tokens("Resume (Aug 2026) (1).pdf"), vec!["resume"]);
+        // Acronyms.
+        let h = title_tokens("Hierarchical Cognitive Memory Architecture for Hybrid Retrieval.pdf");
+        assert!(title_acronym_hit(&h, &query_tokens("how does consolidation work in HCMA?")));
+        assert!(!title_acronym_hit(&h, &query_tokens("how does memory work?")));
     }
 
     #[test]

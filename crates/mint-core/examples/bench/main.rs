@@ -53,8 +53,33 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&dir)?;
 
     let report = {
-        let eng = MemoryEngine::open_with_models(&dir, &models)?;
-        run(&eng, &label, &llm, scale)?
+        let mut eng = MemoryEngine::open_with_models(&dir, &models)?;
+        // --tune topic_join=0.45,offtopic_penalty=0.5 (see engine::Tuning)
+        if let Some(spec) = arg(&args, "--tune") {
+            let mut t = eng.tuning();
+            for kv in spec.split(',') {
+                let Some((k, v)) = kv.split_once('=') else { continue };
+                let v: f32 = v.trim().parse()?;
+                match k.trim() {
+                    "topic_join" => t.topic_join = v,
+                    "topic_join_direct" => t.topic_join_direct = v,
+                    "activation_min" => t.activation_min = v,
+                    "focus_conf" => t.focus_conf = v,
+                    "offtopic_penalty" => t.offtopic_penalty = v,
+                    "topic_weight" => t.topic_weight = v,
+                    "named_weight" => t.named_weight = v,
+                    "profile_weight" => t.profile_weight = v,
+                    "rrf_k" => t.rrf_k = v,
+                    "per_doc_cap" => t.per_doc_cap = v as usize,
+                    other => anyhow::bail!("unknown tuning key: {other}"),
+                }
+            }
+            eng.set_tuning(t);
+        }
+        let tuning = format!("{:?}", eng.tuning());
+        let mut r = run(&eng, &label, &llm, scale)?;
+        r["tuning"] = json!(tuning);
+        r
     };
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -97,18 +122,24 @@ fn run(eng: &MemoryEngine, label: &str, llm: &str, scale: usize) -> Result<Value
     // ---- scale: distractor documents (incl. hard negatives) ---------------
     // Ingested first so the labeled corpus must be found among them. Never
     // spends LLM calls (entity extraction on hundreds of docs is not the point).
+    // id -> ground-truth item key (documents map their chunks via parent_id),
+    // and item key -> true subject. Distractors are items too, so routing
+    // quality counts a real paper being absorbed into a distractor topic.
+    let mut item_of: HashMap<String, String> = HashMap::new();
+    let mut true_topic: HashMap<String, String> = HashMap::new();
+
     let ts = Instant::now();
     let mut scale_chunks = 0usize;
-    for (title, text, _domain) in corpus::filler_docs(scale) {
-        let (_, n) = eng.ingest_text(&title, &text, "")?;
+    for (i, (title, text, domain)) in corpus::filler_docs(scale).into_iter().enumerate() {
+        let (doc, n) = eng.ingest_text(&title, &text, "")?;
         scale_chunks += n;
+        let key = format!("filler-{i}");
+        item_of.insert(doc.id.clone(), key.clone());
+        true_topic.insert(key, format!("filler:{domain}"));
     }
     let scale_ms = ts.elapsed().as_secs_f64() * 1000.0;
 
     // ---- ingest -----------------------------------------------------------
-    // id -> ground-truth item key (documents map their chunks via parent_id).
-    let mut item_of: HashMap<String, String> = HashMap::new();
-    let mut true_topic: HashMap<&str, &str> = HashMap::new();
     let mut chunks = 0usize;
 
     let t0 = Instant::now();
@@ -116,9 +147,19 @@ fn run(eng: &MemoryEngine, label: &str, llm: &str, scale: usize) -> Result<Value
         let (doc, n) = eng.ingest_text(d.title, d.text, llm)?;
         chunks += n;
         item_of.insert(doc.id.clone(), d.key.to_string());
-        true_topic.insert(d.key, d.topic);
+        true_topic.insert(d.key.to_string(), d.topic.to_string());
     }
     let docs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    // Phase 3 (LLM mode): distill rolling topic summaries from the documents
+    // BEFORE notes arrive, so notes route against what each subject is about.
+    let mut summaries_ms = 0.0;
+    let mut summarized = 0usize;
+    if !llm.is_empty() {
+        let t = Instant::now();
+        summarized = eng.refresh_due_topics(llm, 1, 50);
+        summaries_ms = t.elapsed().as_secs_f64() * 1000.0;
+    }
 
     let t1 = Instant::now();
     for n in corpus::NOTES {
@@ -127,9 +168,14 @@ fn run(eng: &MemoryEngine, label: &str, llm: &str, scale: usize) -> Result<Value
         // Mirror the chat capture path: route every captured note to a topic.
         eng.route_and_assign(&m.id, &m.text, llm);
         item_of.insert(m.id.clone(), n.key.to_string());
-        true_topic.insert(n.key, n.topic);
+        true_topic.insert(n.key.to_string(), n.topic.to_string());
     }
     let notes_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+    // Periodic maintenance: re-home stragglers now that every subject exists.
+    let tc = Instant::now();
+    let rehomed = eng.consolidate_topics()?;
+    let consolidate_ms = tc.elapsed().as_secs_f64() * 1000.0;
 
     // Optional LLM-backed maintenance (topic summaries etc.) when available.
     let mut maintenance_ms = 0.0;
@@ -153,45 +199,143 @@ fn run(eng: &MemoryEngine, label: &str, llm: &str, scale: usize) -> Result<Value
     };
 
     // ---- topic routing quality -------------------------------------------
-    // Pairwise agreement between predicted topic_id and ground-truth topic over
-    // every top-level item (documents + notes).
-    let items: Vec<(String, &str, Option<String>)> = item_of
+    // Pairwise agreement between predicted topic_id and ground-truth subject
+    // over every top-level item (documents + notes), distractors included.
+    let items: Vec<(String, String, Option<String>)> = item_of
         .iter()
         .filter_map(|(id, key)| {
-            let tt = true_topic.get(key.as_str())?;
+            let tt = true_topic.get(key)?;
             let pred = by_id.get(id).and_then(|m| m.topic_id.clone());
-            Some((key.clone(), *tt, pred))
+            Some((key.clone(), tt.clone(), pred))
         })
         .collect();
-    let (mut tp, mut fp, mut fneg) = (0usize, 0usize, 0usize);
-    for i in 0..items.len() {
-        for j in (i + 1)..items.len() {
-            let same_true = items[i].1 == items[j].1;
-            let same_pred = items[i].2.is_some() && items[i].2 == items[j].2;
-            match (same_true, same_pred) {
-                (true, true) => tp += 1,
-                (false, true) => fp += 1,
-                (true, false) => fneg += 1,
-                _ => {}
+    let is_filler = |k: &str| k.starts_with("filler-");
+    let pairwise = |only_labeled: bool| -> (f64, f64, f64) {
+        let sel: Vec<&(String, String, Option<String>)> =
+            items.iter().filter(|x| !only_labeled || !is_filler(&x.0)).collect();
+        let (mut tp, mut fp, mut fneg) = (0usize, 0usize, 0usize);
+        for i in 0..sel.len() {
+            for j in (i + 1)..sel.len() {
+                let same_true = sel[i].1 == sel[j].1;
+                let same_pred = sel[i].2.is_some() && sel[i].2 == sel[j].2;
+                match (same_true, same_pred) {
+                    (true, true) => tp += 1,
+                    (false, true) => fp += 1,
+                    (true, false) => fneg += 1,
+                    _ => {}
+                }
             }
         }
-    }
-    let t_prec = ratio(tp, tp + fp);
-    let t_rec = ratio(tp, tp + fneg);
-    let t_f1 = f1(t_prec, t_rec);
+        let p = ratio(tp, tp + fp);
+        let r = ratio(tp, tp + fneg);
+        (p, r, f1(p, r))
+    };
+    let (t_prec, t_rec, t_f1) = pairwise(true);
+    let (a_prec, a_rec, a_f1) = pairwise(false);
     let pred_topics: HashSet<_> = items.iter().filter_map(|x| x.2.clone()).collect();
-    let true_topics: HashSet<_> = items.iter().map(|x| x.1).collect();
+    let true_topics: HashSet<_> = items.iter().map(|x| x.1.clone()).collect();
     let unrouted = items.iter().filter(|x| x.2.is_none()).count();
+    // A topic is impure when it mixes true subjects; a labeled item is absorbed
+    // when it shares a topic with a distractor from another subject.
+    let mut impure = 0usize;
+    let mut absorbed: Vec<String> = Vec::new();
     let mut topic_listing: Vec<Value> = Vec::new();
     for tid in &pred_topics {
         let name = by_id.get(tid).map(|m| m.title.clone()).unwrap_or_default();
-        let mut members: Vec<String> = items
+        let members: Vec<&(String, String, Option<String>)> =
+            items.iter().filter(|x| x.2.as_ref() == Some(tid)).collect();
+        let subjects: HashSet<&String> = members.iter().map(|x| &x.1).collect();
+        if subjects.len() > 1 {
+            impure += 1;
+            for m in &members {
+                if !is_filler(&m.0)
+                    && members.iter().any(|o| is_filler(&o.0) && o.1 != m.1)
+                {
+                    absorbed.push(m.0.clone());
+                }
+            }
+        }
+        let mut labeled: Vec<String> = members
             .iter()
-            .filter(|x| x.2.as_ref() == Some(tid))
+            .filter(|x| !is_filler(&x.0))
             .map(|x| x.0.clone())
             .collect();
-        members.sort();
-        topic_listing.push(json!({ "name": name, "members": members }));
+        labeled.sort();
+        let fillers = members.len() - labeled.len();
+        if !labeled.is_empty() {
+            let summary = by_id
+                .get(tid)
+                .filter(|m| m.text != m.title)
+                .map(|m| m.text.clone())
+                .unwrap_or_default();
+            topic_listing.push(json!({
+                "name": name, "members": labeled, "fillers": fillers, "summary": summary,
+            }));
+        }
+    }
+    absorbed.sort();
+
+    // Routing diagnostic: for each labeled item NOT filed with the majority of
+    // its true subject, show its nearest filed neighbours and best topic-node
+    // match (dense cosine) so thresholds are tuned on evidence, not guesses.
+    let mut majority: HashMap<String, (Option<String>, usize)> = HashMap::new();
+    {
+        let mut counts: HashMap<(String, Option<String>), usize> = HashMap::new();
+        for x in items.iter().filter(|x| !is_filler(&x.0)) {
+            *counts.entry((x.1.clone(), x.2.clone())).or_insert(0) += 1;
+        }
+        for ((subject, tid), n) in counts {
+            let e = majority.entry(subject).or_insert((None, 0));
+            if n > e.1 {
+                *e = (tid, n);
+            }
+        }
+    }
+    let mut diag: Vec<Value> = Vec::new();
+    for (id, key) in &item_of {
+        if is_filler(key) {
+            continue;
+        }
+        let Some(subject) = true_topic.get(key) else { continue };
+        let Some(m) = by_id.get(id) else { continue };
+        let Some((maj, n)) = majority.get(subject) else { continue };
+        if *n < 2 || &m.topic_id == maj {
+            continue;
+        }
+        let near = eng.search(SearchRequest {
+            query: m.text.clone(),
+            mode: SearchMode::Dense,
+            limit: 6,
+            site_id: None,
+            kind: None,
+        })?;
+        let neighbours: Vec<String> = near
+            .results
+            .iter()
+            .filter(|r| r.memory.id != m.id && r.memory.kind != MemoryKind::Topic)
+            .take(3)
+            .map(|r| {
+                let g = item_of
+                    .get(&r.memory.id)
+                    .or_else(|| r.memory.parent_id.as_ref().and_then(|p| item_of.get(p)))
+                    .cloned()
+                    .unwrap_or_else(|| "-".into());
+                format!("{g} {:.2}", r.score)
+            })
+            .collect();
+        let topic_hit = eng
+            .search(SearchRequest {
+                query: m.text.clone(),
+                mode: SearchMode::Dense,
+                limit: 1,
+                site_id: None,
+                kind: Some(MemoryKind::Topic),
+            })?
+            .results
+            .first()
+            .map(|r| format!("{} {:.2}", r.memory.title, r.score))
+            .unwrap_or_default();
+        diag.push(json!({ "item": key, "neighbours": neighbours, "best_topic": topic_hit }));
     }
 
     // ---- capture guard -----------------------------------------------------
@@ -288,11 +432,15 @@ fn run(eng: &MemoryEngine, label: &str, llm: &str, scale: usize) -> Result<Value
             "docs_ms": docs_ms, "notes_ms": notes_ms,
             "chunks_per_sec": chunks as f64 / (docs_ms / 1000.0).max(1e-9),
             "maintenance_ms": maintenance_ms,
+            "topic_summaries": summarized, "topic_summaries_ms": summaries_ms,
+            "rehomed": rehomed, "consolidate_ms": consolidate_ms,
         },
         "topics": {
             "predicted": pred_topics.len(), "true": true_topics.len(), "unrouted": unrouted,
             "pair_precision": t_prec, "pair_recall": t_rec, "pair_f1": t_f1,
-            "listing": topic_listing,
+            "all_precision": a_prec, "all_recall": a_rec, "all_f1": a_f1,
+            "impure": impure, "absorbed": absorbed,
+            "listing": topic_listing, "split_diagnostics": diag,
         },
         "capture": { "accuracy": cap_acc, "failures": cap_fail },
         "pipelines": pipelines,
@@ -426,6 +574,16 @@ fn print_report(r: &Value) {
         ing["docs"], ing["chunks"], f(&ing["docs_ms"]), f(&ing["chunks_per_sec"]),
         ing["notes"], f(&ing["notes_ms"])
     );
+    println!(
+        "consolidation: {} memories re-homed in {:.0} ms",
+        ing["rehomed"], f(&ing["consolidate_ms"])
+    );
+    if f(&ing["topic_summaries"]) > 0.0 {
+        println!(
+            "topic summaries: {} distilled in {:.0} ms; maintenance {:.0} ms",
+            ing["topic_summaries"], f(&ing["topic_summaries_ms"]), f(&ing["maintenance_ms"])
+        );
+    }
     let sc = &r["scale"];
     if f(&sc["docs"]) > 0.0 {
         println!(
@@ -444,9 +602,23 @@ fn print_report(r: &Value) {
         t["predicted"], t["true"], t["unrouted"],
         f(&t["pair_precision"]), f(&t["pair_recall"]), f(&t["pair_f1"])
     );
+    println!(
+        "        all items incl. distractors: P {:.3} R {:.3} F1 {:.3}; impure topics {}; absorbed {}",
+        f(&t["all_precision"]), f(&t["all_recall"]), f(&t["all_f1"]), t["impure"], t["absorbed"]
+    );
     if let Some(list) = t["listing"].as_array() {
         for x in list {
-            println!("   - {:<28} {}", x["name"].as_str().unwrap_or(""), x["members"]);
+            let fillers = x["fillers"].as_u64().unwrap_or(0);
+            let extra = if fillers > 0 { format!(" + {fillers} distractors") } else { String::new() };
+            println!("   - {:<28} {}{}", x["name"].as_str().unwrap_or(""), x["members"], extra);
+        }
+    }
+    if let Some(d) = t["split_diagnostics"].as_array() {
+        for x in d {
+            println!(
+                "   split {}: neighbours {} | best topic {}",
+                x["item"], x["neighbours"], x["best_topic"]
+            );
         }
     }
     println!("capture guard accuracy: {:.3}", f(&r["capture"]["accuracy"]));

@@ -136,7 +136,8 @@ function App() {
             <div className="maint">
               {maintReport && (
                 <span className="muted maint-report">
-                  {maintReport.summaries} summaries · {maintReport.archived} archived
+                  {maintReport.summaries} summaries · {maintReport.topics_summarized} topics
+                  refreshed · {maintReport.topics_rehomed} re-filed · {maintReport.archived} archived
                 </span>
               )}
               <button className="ghost" onClick={runMaint} disabled={maintBusy}>

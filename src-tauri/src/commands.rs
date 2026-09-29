@@ -6,9 +6,11 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use base64::Engine as _;
-use mint_core::chat::{extract_events, extract_memories, format_context, system_prompt, today};
+use mint_core::chat::{
+    extract_events, extract_memories, format_context, format_topic_overview, system_prompt, today,
+};
 use mint_core::conversations::{Conversation, ConversationStore, ConversationSummary};
-use mint_core::engine::{MaintenanceReport, SyncCounts};
+use mint_core::engine::{MaintenanceReport, OrganizeReport, SyncCounts, TopicInfo};
 use mint_core::graph::GraphData;
 use mint_core::ollama::{ChatMessage, Delta, Ollama};
 use mint_core::record::{
@@ -135,6 +137,67 @@ pub fn clear_archive(state: State<AppState>) -> Result<usize, String> {
         .map_err(|e| e.to_string())
 }
 
+// ---- topics (schema layer: auto-routing + the user's overrides) ----------
+
+#[tauri::command]
+pub fn list_topics(state: State<AppState>) -> Result<Vec<TopicInfo>, String> {
+    lock_engine(&state.engine)?
+        .list_topics()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn rename_topic(state: State<AppState>, id: String, name: String) -> Result<(), String> {
+    lock_engine(&state.engine)?
+        .rename_topic(&id, &name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn merge_topics(state: State<AppState>, from: String, into: String) -> Result<(), String> {
+    lock_engine(&state.engine)?
+        .merge_topics(&from, &into)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn move_to_topic(
+    state: State<AppState>,
+    memory_id: String,
+    topic_id: String,
+) -> Result<(), String> {
+    lock_engine(&state.engine)?
+        .move_to_topic(&memory_id, &topic_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Re-distill one topic's rolling summary (local LLM).
+#[tauri::command]
+pub async fn refresh_topic(state: State<'_, AppState>, id: String) -> Result<TopicInfo, String> {
+    let engine = state.engine.clone();
+    let model = state.fast_model.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let eng = engine.lock().map_err(|_| "engine poisoned".to_string())?;
+        eng.refresh_topic(&id, &model).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("topic task failed: {e}"))?
+}
+
+/// File every not-yet-organized memory/document into topics, re-home
+/// stragglers, and summarize (local LLM).
+#[tauri::command]
+pub async fn organize_topics(state: State<'_, AppState>) -> Result<OrganizeReport, String> {
+    let engine = state.engine.clone();
+    let model = state.fast_model.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let eng = engine.lock().map_err(|_| "engine poisoned".to_string())?;
+        eng.organize(&model).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("organize task failed: {e}"))?
+}
+
 // ---- timeline / calendar -------------------------------------------------
 
 #[tauri::command]
@@ -178,6 +241,13 @@ pub async fn ingest_document(
         let (doc, chunks) = eng
             .ingest_document(&name, &bytes, &fast_model)
             .map_err(|e| e.to_string())?;
+        // Rolling summary (and a good name) for the subject this document
+        // joined, so chat and routing immediately know what it is about.
+        if let Ok(Some(stored)) = eng.get(&doc.id) {
+            if let Some(tid) = stored.topic_id {
+                let _ = eng.refresh_topic_if_due(&tid, &fast_model, 1);
+            }
+        }
         Ok(DocIngestResult {
             id: doc.id,
             title: doc.title,
@@ -476,18 +546,26 @@ fn run_turn(
     message: String,
     history: Vec<ChatMessage>,
 ) -> Result<ChatTurnResult, String> {
-    // 1. Retrieve relevant memories (hybrid) for grounding.
+    // 1. Retrieve relevant memories for grounding: topic-aware retrieval
+    //    (subject first, then details) plus the subjects' rolling summaries.
     stage(&app, "retrieving", "searching device memory");
-    let results = {
+    let ctx = {
         let eng = lock_engine(&engine)?;
-        // Deterministic retrieval: hybrid search, plus profile-document chunks
-        // for personal questions and any document the query names by title.
-        eng.retrieve(&message, 6).unwrap_or_default()
+        eng.retrieve_context(&message, 6).ok()
+    };
+    let (results, topics) = match ctx {
+        Some(c) => (c.results, c.topics),
+        None => (Vec::new(), Vec::new()),
     };
     // Entity hub nodes are bare names; keep them out of the chat grounding.
     let results: Vec<_> = results
         .into_iter()
         .filter(|r| r.memory.kind != MemoryKind::Entity)
+        .collect();
+    let overview: Vec<(String, String)> = topics
+        .iter()
+        .filter(|t| !t.summary.is_empty())
+        .map(|t| (t.name.clone(), t.summary.clone()))
         .collect();
     let retrieved: Vec<RetrievedItem> = results
         .iter()
@@ -498,7 +576,15 @@ fn run_turn(
             score: r.score,
         })
         .collect();
-    stage(&app, "retrieved", format!("{} relevant memories", retrieved.len()));
+    let subject = topics
+        .first()
+        .map(|t| format!(" in {}", t.name))
+        .unwrap_or_default();
+    stage(
+        &app,
+        "retrieved",
+        format!("{} relevant memories{subject}", retrieved.len()),
+    );
     {
         // Retrieval counts as usage -> feeds salience.
         let eng = lock_engine(&engine)?;
@@ -507,7 +593,7 @@ fn run_turn(
     }
 
     // 2. Build the prompt and stream the answer + thinking.
-    let context = format_context(&results);
+    let context = format!("{}{}", format_topic_overview(&overview), format_context(&results));
     let mut messages = vec![ChatMessage::system(system_prompt(&context))];
     messages.extend(history);
     messages.push(ChatMessage::user(message.clone()));
@@ -549,8 +635,12 @@ fn run_turn(
                 // Link the new memory to the entities it mentions.
                 let _ = eng.attach_entities(&m.id, &m.text, &fast_model);
                 // File it under a topic (schema layer): join the nearest subject
-                // or start a new one. Keeps a research thread coherent.
-                let _ = eng.route_and_assign(&m.id, &m.text, &fast_model);
+                // or start a new one. Keeps a research thread coherent. A new
+                // subject gets its summary right away; an existing one rolls
+                // its summary forward every few new memories.
+                if let Some(tid) = eng.route_and_assign(&m.id, &m.text, &fast_model) {
+                    let _ = eng.refresh_topic_if_due(&tid, &fast_model, 3);
+                }
                 let item = CapturedItem {
                     id: m.id.clone(),
                     title: m.title.clone(),

@@ -165,6 +165,10 @@ fn run(eng: &MemoryEngine, label: &str, llm: &str, scale: usize) -> Result<Value
     for n in corpus::NOTES {
         let title: String = n.text.chars().take(48).collect();
         let m = eng.add(new_mem(MemoryKind::Note, &title, n.text, None))?;
+        // Mirror the chat capture path in LLM mode: link entities, then route.
+        if !llm.is_empty() {
+            let _ = eng.attach_entities(&m.id, &m.text, llm);
+        }
         // Mirror the chat capture path: route every captured note to a topic.
         eng.route_and_assign(&m.id, &m.text, llm);
         item_of.insert(m.id.clone(), n.key.to_string());

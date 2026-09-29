@@ -580,6 +580,12 @@ impl MemoryEngine {
                 *votes.entry(h.memory.id).or_insert(0.0) += h.score;
             }
         }
+        // Graph evidence: memories that mention the same specific entities
+        // (e.g. "I-20" and "DSO") belong together even when their wording is
+        // too different for embeddings of short text to agree.
+        for (tid, score) in self.entity_votes(exclude) {
+            *votes.entry(tid).or_insert(0.0) += score;
+        }
         if let Some((tid, _)) = votes
             .into_iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -594,6 +600,56 @@ impl MemoryEngine {
             None => self.name_topic(&probe, model),
         };
         Ok(Some(self.create_topic(&name, &[])?))
+    }
+
+    /// Topic votes from shared entities: for each topic, ENTITY_VOTE per
+    /// distinct specific entity that `mem_id` shares with that topic's members.
+    /// Only topics backed by 2+ shared entities vote (one incidental shared
+    /// word is not enough), and generic entities mentioned by many memories are
+    /// ignored.
+    fn entity_votes(&self, mem_id: &str) -> Vec<(String, f32)> {
+        const ENTITY_VOTE: f32 = 0.3;
+        const GENERIC_DF: usize = 10;
+        let (mine, holders): (Vec<String>, HashMap<String, Vec<String>>) = {
+            let Ok(g) = self.graph.lock() else {
+                return Vec::new();
+            };
+            let mine: Vec<String> = g
+                .all()
+                .iter()
+                .filter(|e| e.relation == "mentions" && e.from == mem_id)
+                .map(|e| e.to.clone())
+                .collect();
+            let mut holders: HashMap<String, Vec<String>> = HashMap::new();
+            for e in g.all() {
+                if e.relation == "mentions" && e.from != mem_id && mine.contains(&e.to) {
+                    holders.entry(e.to.clone()).or_default().push(e.from.clone());
+                }
+            }
+            (mine, holders)
+        };
+        if mine.is_empty() {
+            return Vec::new();
+        }
+        // topic -> set of shared entities
+        let mut shared: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for (ent, mems) in holders {
+            if mems.len() > GENERIC_DF {
+                continue;
+            }
+            for m in mems {
+                if let Ok(Some(mem)) = self.get(&m) {
+                    if let Some(tid) = mem.topic_id {
+                        shared.entry(tid).or_default().insert(ent.clone());
+                    }
+                }
+            }
+        }
+        shared
+            .into_iter()
+            .filter(|(_, ents)| ents.len() >= 2)
+            .map(|(tid, ents)| (tid, ENTITY_VOTE * ents.len() as f32))
+            .collect()
     }
 
     /// Create an (unsummarized) topic node and return its id.
@@ -998,6 +1054,12 @@ only the memories provided; do not invent facts.";
                         e.1 = e.1.max(h.score);
                         e.2 += 1;
                     }
+                }
+                for (other, score) in self.entity_votes(&m.id) {
+                    let e = votes.entry(other).or_insert((0.0, 0.0, 0));
+                    e.0 += score;
+                    e.1 = e.1.max(score);
+                    e.2 += 2; // backed by 2+ shared specific entities
                 }
                 let own = votes.get(&tid).map(|v| v.0).unwrap_or(0.0);
                 let best = votes

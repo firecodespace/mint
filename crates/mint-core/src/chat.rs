@@ -5,10 +5,70 @@
 //! retrieved memories, and extracting durable memories from a conversation turn.
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde_json::Value;
 
 use crate::ollama::Ollama;
 use crate::record::{MemoryKind, MemorySource, NewMemory, SearchResult, Sensitivity};
+
+/// Parse model output as JSON, tolerating prose around it: the whole string,
+/// else the outermost {...} or [...] span. Small local models often wrap or
+/// decorate JSON even in JSON mode.
+pub fn parse_json_lenient(raw: &str) -> Option<Value> {
+    let t = raw.trim();
+    if let Ok(v) = serde_json::from_str(t) {
+        return Some(v);
+    }
+    for (open, close) in [('{', '}'), ('[', ']')] {
+        if let (Some(a), Some(b)) = (t.find(open), t.rfind(close)) {
+            if b > a {
+                if let Ok(v) = serde_json::from_str(&t[a..=b]) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The array under `key` (any key casing), or the value itself if it is an
+/// array. Missing/mistyped -> empty.
+pub fn json_array_field(v: &Value, key: &str) -> Vec<Value> {
+    if let Some(a) = v.as_array() {
+        return a.clone();
+    }
+    if let Some(obj) = v.as_object() {
+        for (k, val) in obj {
+            if k.eq_ignore_ascii_case(key) {
+                if let Some(a) = val.as_array() {
+                    return a.clone();
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// A string field, or "" when missing / null / not a string.
+fn str_field(v: &Value, key: &str) -> String {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// A list of strings, skipping non-string entries.
+fn str_list(v: &Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// System persona + instructions, with the retrieved-memory context inlined.
 pub fn system_prompt(context: &str) -> String {
@@ -66,24 +126,6 @@ fn truncate(s: &str, max: usize) -> String {
         let t: String = s.chars().take(max).collect();
         format!("{t}...")
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct ExtractedItem {
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    kind: String,
-    #[serde(default)]
-    tags: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExtractionResult {
-    #[serde(default)]
-    memories: Vec<ExtractedItem>,
 }
 
 const EXTRACT_SYSTEM: &str = "You extract durable memories from ONLY the user's latest \
@@ -178,20 +220,70 @@ pub fn mentions_time(msg: &str) -> bool {
             || m.contains("nd") || m.contains("rd"))
 }
 
-#[derive(Debug, Deserialize)]
-struct EventItem {
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    due: String,
-    #[serde(default)]
-    kind: String,
+/// Parse an event-extraction reply leniently into timeline memories. Items
+/// need a title and a VALID calendar date (YYYY-MM-DD); bad items are skipped
+/// without discarding good ones.
+pub fn parse_events(raw: &str) -> Vec<NewMemory> {
+    let Some(v) = parse_json_lenient(raw) else {
+        return Vec::new();
+    };
+    json_array_field(&v, "items")
+        .iter()
+        .filter_map(|it| {
+            let title = str_field(it, "title");
+            let due = str_field(it, "due");
+            if title.is_empty() || chrono::NaiveDate::parse_from_str(&due, "%Y-%m-%d").is_err() {
+                return None;
+            }
+            let kind_tag = if str_field(it, "kind") == "task" { "task" } else { "event" };
+            Some(NewMemory {
+                kind: MemoryKind::Event,
+                text: format!("{title} — {kind_tag} on {due}"),
+                title,
+                site_id: String::new(),
+                asset_id: String::new(),
+                geo: None,
+                tags: vec![kind_tag.to_string()],
+                source: MemorySource::Chat,
+                sensitivity: Sensitivity::Shareable,
+                parent_id: None,
+                topic_id: None,
+                due_at: Some(due),
+            })
+        })
+        .collect()
 }
 
-#[derive(Debug, Deserialize)]
-struct EventResult {
-    #[serde(default)]
-    items: Vec<EventItem>,
+/// Parse a memory-extraction reply leniently (junk facts dropped, at most 3).
+pub fn parse_memories(raw: &str) -> Vec<NewMemory> {
+    let Some(v) = parse_json_lenient(raw) else {
+        return Vec::new();
+    };
+    json_array_field(&v, "memories")
+        .iter()
+        .filter_map(|it| {
+            let text = str_field(it, "text");
+            if is_junk(&text) {
+                return None;
+            }
+            let title = str_field(it, "title");
+            Some(NewMemory {
+                kind: MemoryKind::parse_lenient(&str_field(it, "kind")),
+                title: if title.is_empty() { truncate(&text, 60) } else { title },
+                text,
+                site_id: String::new(),
+                asset_id: String::new(),
+                geo: None,
+                tags: str_list(it, "tags"),
+                source: MemorySource::Chat,
+                sensitivity: Sensitivity::Shareable,
+                parent_id: None,
+                topic_id: None,
+                due_at: None,
+            })
+        })
+        .take(3) // don't over-capture from a single turn
+        .collect()
 }
 
 /// Extract tasks/deadlines/dated events from the user's message, resolving
@@ -213,31 +305,7 @@ absolute calendar date. Return ONLY JSON of the form \
 Only include items that have a real date or deadline. If none, return {{\"items\":[]}}."
     );
     let raw = ollama.generate(model, Some(&system), user_message, true)?;
-    let parsed: EventResult = serde_json::from_str(&raw).unwrap_or(EventResult { items: Vec::new() });
-
-    let items = parsed
-        .items
-        .into_iter()
-        .filter(|it| it.due.trim().len() >= 8 && !it.title.trim().is_empty())
-        .map(|it| {
-            let kind_tag = if it.kind == "task" { "task" } else { "event" };
-            NewMemory {
-                kind: MemoryKind::Event,
-                text: format!("{} — {} on {}", it.title, kind_tag, it.due.trim()),
-                title: it.title,
-                site_id: String::new(),
-                asset_id: String::new(),
-                geo: None,
-                tags: vec![kind_tag.to_string()],
-                source: MemorySource::Chat,
-                sensitivity: Sensitivity::Shareable,
-                parent_id: None,
-                topic_id: None,
-                due_at: Some(it.due.trim().to_string()),
-            }
-        })
-        .collect();
-    Ok(items)
+    Ok(parse_events(&raw))
 }
 
 /// Ask a fast local model to extract durable memories from one turn.
@@ -260,40 +328,38 @@ Extract only NEW durable facts the user stated. If it is a question or small tal
 return {{\"memories\":[]}}."
     );
     let raw = ollama.generate(model, Some(EXTRACT_SYSTEM), &prompt, true)?;
-    let parsed: ExtractionResult = serde_json::from_str(&raw).unwrap_or(ExtractionResult {
-        memories: Vec::new(),
-    });
-
-    let memories = parsed
-        .memories
-        .into_iter()
-        .filter(|it| !is_junk(&it.text))
-        .take(3) // don't over-capture from a single turn
-        .map(|it| NewMemory {
-            kind: MemoryKind::parse_lenient(&it.kind),
-            title: if it.title.trim().is_empty() {
-                truncate(&it.text, 60)
-            } else {
-                it.title
-            },
-            text: it.text,
-            site_id: String::new(),
-            asset_id: String::new(),
-            geo: None,
-            tags: it.tags,
-            source: MemorySource::Chat,
-            sensitivity: Sensitivity::Shareable,
-            parent_id: None,
-            topic_id: None,
-            due_at: None,
-        })
-        .collect();
-    Ok(memories)
+    Ok(parse_memories(&raw))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_query_only;
+    use super::{is_query_only, parse_events, parse_memories};
+
+    #[test]
+    fn extraction_survives_messy_model_output() {
+        // One item with a null field must not discard the valid one.
+        let raw = r#"{"memories":[{"title":null,"text":"I prefer dark roast","kind":"note","tags":null},
+                      {"title":"Bad","text":"unknown"}]}"#;
+        let m = parse_memories(raw);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].text, "I prefer dark roast");
+        assert!(!m[0].title.is_empty());
+        // Prose around JSON, capitalized key.
+        assert_eq!(parse_memories("Sure! {\"Memories\":[{\"text\":\"My exam is Friday\"}]}").len(), 1);
+        assert!(parse_memories("no json here").is_empty());
+    }
+
+    #[test]
+    fn events_need_a_real_date() {
+        let raw = r#"{"items":[{"title":"Submit report","due":"2026-10-02","kind":"task"},
+                     {"title":"Bad date","due":"Friday"},
+                     {"title":"Impossible","due":"2026-13-45"},
+                     {"title":null,"due":"2026-10-03"}]}"#;
+        let e = parse_events(raw);
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].due_at.as_deref(), Some("2026-10-02"));
+        assert_eq!(e[0].tags, vec!["task"]);
+    }
 
     #[test]
     fn statements_are_captured() {

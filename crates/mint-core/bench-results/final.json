@@ -1,32 +1,32 @@
 {
   "label": "final",
-  "when": "2026-09-29T22:53:04.745690+00:00",
+  "when": "2026-09-29T23:04:27.259096200+00:00",
   "llm": "",
   "k": 6,
   "scale": {
     "docs": 0,
     "chunks": 0,
-    "ms": 0.0086,
+    "ms": 0.0033,
     "chunks_per_sec": 0.0
   },
   "ingest_ab": {
     "chunks": 30,
-    "old_ms": 2168.7412,
-    "new_ms": 1098.4624000000001,
-    "speedup": 1.9743426811878129
+    "old_ms": 1554.1740000000002,
+    "new_ms": 510.7258,
+    "speedup": 3.04306929471744
   },
   "ingest": {
     "docs": 6,
     "chunks": 12,
     "notes": 14,
-    "docs_ms": 1074.163,
-    "notes_ms": 1733.7176,
-    "chunks_per_sec": 11.171488870869691,
+    "docs_ms": 577.9556,
+    "notes_ms": 1002.2537,
+    "chunks_per_sec": 20.762840605748952,
     "maintenance_ms": 0.0,
     "topic_summaries": 0,
     "topic_summaries_ms": 0.0,
     "rehomed": 1,
-    "consolidate_ms": 264.5843
+    "consolidate_ms": 136.0722
   },
   "topics": {
     "predicted": 10,
@@ -42,72 +42,10 @@
     "absorbed": [],
     "listing": [
       {
-        "name": "Profile",
-        "members": [
-          "resume_doc"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Want Learn Piano",
-        "members": [
-          "n_p1",
-          "n_p2",
-          "n_p3"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Physics Informed Transit Detection",
-        "members": [
-          "exo_doc",
-          "n_exo1",
-          "n_exo2",
-          "n_exo3"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Hierarchical Cognitive Memory Architecture",
-        "members": [
-          "hcma_doc",
-          "n_h1"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Expires Need Request",
-        "members": [
-          "n_usa1"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Usa Study Guide",
-        "members": [
-          "usa_doc"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
         "name": "Weeknight Recipes",
         "members": [
           "cooking_doc",
           "n_c1"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Running Three Times",
-        "members": [
-          "n_f1"
         ],
         "fillers": 0,
         "summary": ""
@@ -124,9 +62,71 @@
         "summary": ""
       },
       {
+        "name": "Physics Informed Transit Detection",
+        "members": [
+          "exo_doc",
+          "n_exo1",
+          "n_exo2",
+          "n_exo3"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Want Learn Piano",
+        "members": [
+          "n_p1",
+          "n_p2",
+          "n_p3"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Usa Study Guide",
+        "members": [
+          "usa_doc"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Hierarchical Cognitive Memory Architecture",
+        "members": [
+          "hcma_doc",
+          "n_h1"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Running Three Times",
+        "members": [
+          "n_f1"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Profile",
+        "members": [
+          "resume_doc"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
         "name": "Deadlift Focusing Form",
         "members": [
           "n_f2"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Expires Need Request",
+        "members": [
+          "n_usa1"
         ],
         "fillers": 0,
         "summary": ""
@@ -145,17 +145,17 @@
       "ndcg": 0.9108557805381438,
       "hit1": 0.95,
       "precision": 0.4999999999999999,
-      "p50_ms": 7.7204,
-      "p95_ms": 19.8185
+      "p50_ms": 4.147900000000001,
+      "p95_ms": 5.1049
     },
     "retrieve": {
       "recall": 0.975,
       "mrr": 1.0,
-      "ndcg": 0.9281442949914428,
+      "ndcg": 0.927501553002324,
       "hit1": 1.0,
       "precision": 0.5833333333333333,
-      "p50_ms": 9.6556,
-      "p95_ms": 23.4864
+      "p50_ms": 5.350899999999999,
+      "p95_ms": 6.1536
     }
   },
   "per_query": [
@@ -687,14 +687,14 @@
       "query": "Kepler light curve denoising",
       "recall": 1.0,
       "mrr": 1.0,
-      "ndcg": 1.0,
+      "ndcg": 0.9871451602176229,
       "hit1": 1.0,
       "precision": 0.8333333333333334,
       "top": [
         "n_exo2 [note]",
         "exo_doc [doc]",
-        "n_exo1 [note]",
         "exo_doc [chunk]",
+        "n_exo1 [note]",
         "exo_doc [chunk]",
         "n_exo3 [note]"
       ]

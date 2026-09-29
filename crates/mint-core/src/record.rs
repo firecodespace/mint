@@ -112,6 +112,22 @@ pub struct Memory {
     pub due_at: Option<String>,
     #[serde(default)]
     pub done: bool,
+
+    /// Why this memory may (or may not) leave the device, as decided by the
+    /// sync policy ("Stays on device: contains a phone number").
+    #[serde(default)]
+    pub sync_reason: String,
+
+    /// Version chain: the older memory this one updates / replaces.
+    #[serde(default)]
+    pub supersedes: Option<String>,
+    /// Version chain: the newer memory that replaced this one (outdated).
+    #[serde(default)]
+    pub superseded_by: Option<String>,
+
+    /// Device that created this memory (edge <-> cloud provenance).
+    #[serde(default)]
+    pub origin: String,
 }
 
 /// Input for creating a memory. The engine fills id / timestamps / the

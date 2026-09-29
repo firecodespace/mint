@@ -1,32 +1,32 @@
 {
   "label": "final-scale",
-  "when": "2026-09-29T22:54:02.554051400+00:00",
+  "when": "2026-09-29T23:04:48.510417900+00:00",
   "llm": "",
   "k": 6,
   "scale": {
     "docs": 150,
     "chunks": 300,
-    "ms": 43041.293600000005,
-    "chunks_per_sec": 6.970050732861802
+    "ms": 15015.0071,
+    "chunks_per_sec": 19.980010532262753
   },
   "ingest_ab": {
     "chunks": 30,
-    "old_ms": 3499.336,
-    "new_ms": 1353.6546,
-    "speedup": 2.5851025808208385
+    "old_ms": 1491.1646,
+    "new_ms": 448.6061,
+    "speedup": 3.323995371440558
   },
   "ingest": {
     "docs": 6,
     "chunks": 12,
     "notes": 14,
-    "docs_ms": 1052.8943,
-    "notes_ms": 1798.6343,
-    "chunks_per_sec": 11.397155440959269,
+    "docs_ms": 596.1394,
+    "notes_ms": 1111.1417999999999,
+    "chunks_per_sec": 20.129520041788883,
     "maintenance_ms": 0.0,
     "topic_summaries": 0,
     "topic_summaries_ms": 0.0,
     "rehomed": 1,
-    "consolidate_ms": 441.58029999999997
+    "consolidate_ms": 136.5863
   },
   "topics": {
     "predicted": 17,
@@ -42,9 +42,64 @@
     "absorbed": [],
     "listing": [
       {
+        "name": "Physics Informed Transit Detection",
+        "members": [
+          "exo_doc",
+          "n_exo1",
+          "n_exo2",
+          "n_exo3"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
         "name": "Profile",
         "members": [
           "resume_doc"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Deadlift Focusing Form",
+        "members": [
+          "n_f2"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Weeknight Recipes",
+        "members": [
+          "cooking_doc",
+          "n_c1"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Expires Need Request",
+        "members": [
+          "n_usa1"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Want Learn Piano",
+        "members": [
+          "n_p1",
+          "n_p2",
+          "n_p3"
+        ],
+        "fillers": 0,
+        "summary": ""
+      },
+      {
+        "name": "Hierarchical Cognitive Memory Architecture",
+        "members": [
+          "hcma_doc",
+          "n_h1"
         ],
         "fillers": 0,
         "summary": ""
@@ -61,41 +116,6 @@
         "summary": ""
       },
       {
-        "name": "Expires Need Request",
-        "members": [
-          "n_usa1"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Weeknight Recipes",
-        "members": [
-          "cooking_doc",
-          "n_c1"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Want Learn Piano",
-        "members": [
-          "n_p1",
-          "n_p2",
-          "n_p3"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Running Three Times",
-        "members": [
-          "n_f1"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
         "name": "Usa Study Guide",
         "members": [
           "usa_doc"
@@ -104,29 +124,9 @@
         "summary": ""
       },
       {
-        "name": "Deadlift Focusing Form",
+        "name": "Running Three Times",
         "members": [
-          "n_f2"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Hierarchical Cognitive Memory Architecture",
-        "members": [
-          "hcma_doc",
-          "n_h1"
-        ],
-        "fillers": 0,
-        "summary": ""
-      },
-      {
-        "name": "Physics Informed Transit Detection",
-        "members": [
-          "exo_doc",
-          "n_exo1",
-          "n_exo2",
-          "n_exo3"
+          "n_f1"
         ],
         "fillers": 0,
         "summary": ""
@@ -145,8 +145,8 @@
       "ndcg": 0.8692910455341497,
       "hit1": 1.0,
       "precision": 0.4416666666666667,
-      "p50_ms": 10.9791,
-      "p95_ms": 29.3951
+      "p50_ms": 4.802,
+      "p95_ms": 5.9177
     },
     "retrieve": {
       "recall": 0.95,
@@ -154,8 +154,8 @@
       "ndcg": 0.920043427094444,
       "hit1": 1.0,
       "precision": 0.5583333333333332,
-      "p50_ms": 20.1329,
-      "p95_ms": 41.643
+      "p50_ms": 8.082799999999999,
+      "p95_ms": 10.251
     }
   },
   "per_query": [
@@ -659,8 +659,8 @@
         "hcma_doc [chunk]",
         "n_h1 [note]",
         "hcma_doc [doc]",
-        "filler-39 [doc]",
-        "usa_doc [chunk]"
+        "usa_doc [chunk]",
+        "filler-39 [doc]"
       ]
     },
     {
@@ -784,8 +784,8 @@
         "coresum_doc [chunk]",
         "coresum_doc [chunk]",
         "n_cs3 [note]",
-        "n_cs2 [note]",
         "coresum_doc [doc]",
+        "n_cs2 [note]",
         "n_cs1 [note]"
       ]
     },

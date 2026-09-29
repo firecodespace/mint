@@ -12,6 +12,7 @@ pub mod entities;
 pub mod graph;
 pub mod meta;
 pub mod ollama;
+pub mod policy;
 pub mod record;
 pub mod sync;
 

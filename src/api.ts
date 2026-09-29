@@ -13,6 +13,8 @@ import type {
   SearchRequest,
   SearchResponse,
   Stats,
+  SyncReport,
+  SyncStatus,
 } from "./types";
 
 export function addMemory(input: NewMemory): Promise<Memory> {
@@ -87,4 +89,22 @@ export function listDocuments(): Promise<Memory[]> {
 
 export function deleteDocument(id: string): Promise<void> {
   return invoke<void>("delete_document", { id });
+}
+
+// ---- sync ----------------------------------------------------------------
+
+export function syncStatus(): Promise<SyncStatus> {
+  return invoke<SyncStatus>("sync_status");
+}
+
+export function setOnline(online: boolean): Promise<void> {
+  return invoke<void>("set_online", { online });
+}
+
+export function setServerUrl(url: string): Promise<void> {
+  return invoke<void>("set_server_url", { url });
+}
+
+export function syncNow(): Promise<SyncReport> {
+  return invoke<SyncReport>("sync_now");
 }

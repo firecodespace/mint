@@ -8,9 +8,10 @@ import { Search } from "./components/Search";
 import { Browser } from "./components/Browser";
 import { MemoryGraph } from "./components/MemoryGraph";
 import { Vault } from "./components/Vault";
+import { Sync } from "./components/Sync";
 import { HowItWorks } from "./components/HowItWorks";
 
-type Tab = "chat" | "memory" | "vault" | "how";
+type Tab = "chat" | "memory" | "vault" | "sync" | "how";
 type MemView = "graph" | "list";
 
 function App() {
@@ -79,6 +80,9 @@ function App() {
         <button className={tab === "vault" ? "on" : ""} onClick={() => setTab("vault")}>
           Vault
         </button>
+        <button className={tab === "sync" ? "on" : ""} onClick={() => setTab("sync")}>
+          Sync
+        </button>
         <button className={tab === "how" ? "on" : ""} onClick={() => setTab("how")}>
           How it works
         </button>
@@ -129,6 +133,8 @@ function App() {
         <div className="vault-tab">
           <Vault memories={memories} onChange={refresh} />
         </div>
+      ) : tab === "sync" ? (
+        <Sync onChange={refresh} />
       ) : (
         <HowItWorks />
       )}

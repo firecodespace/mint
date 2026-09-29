@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
-use commands::AppState;
+use commands::{AppState, SyncRuntime};
 use mint_core::ollama::{Ollama, DEFAULT_CHAT_MODEL, DEFAULT_FAST_MODEL};
 use mint_core::{ConversationStore, MemoryEngine};
 
@@ -51,6 +51,7 @@ pub fn run() {
                 engine: Arc::new(Mutex::new(engine)),
                 conversations: Arc::new(Mutex::new(conversations)),
                 ollama: Arc::new(ollama),
+                sync: Arc::new(Mutex::new(SyncRuntime::default())),
                 chat_model,
                 fast_model,
             });
@@ -73,6 +74,10 @@ pub fn run() {
             commands::ingest_document,
             commands::list_documents,
             commands::delete_document,
+            commands::sync_status,
+            commands::set_online,
+            commands::set_server_url,
+            commands::sync_now,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

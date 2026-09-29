@@ -173,3 +173,27 @@ export interface DocIngestResult {
   title: string;
   chunks: number;
 }
+
+// ---- sync ----------------------------------------------------------------
+
+export interface SyncCounts {
+  pending: number;
+  synced: number;
+  conflict: number;
+  local_only: number;
+}
+
+export interface SyncReport {
+  pushed: number;
+  pulled: number;
+  conflicts: number;
+}
+
+export interface SyncStatus {
+  online: boolean;
+  reachable: boolean;
+  server_url: string;
+  counts: SyncCounts;
+  last_sync: string | null;
+  last_report: SyncReport | null;
+}

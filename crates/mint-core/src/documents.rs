@@ -95,36 +95,110 @@ const TARGET: usize = 900;
 const MAX: usize = 1300;
 const OVERLAP: usize = 120;
 
-/// Chunk text into ~900-char pieces on paragraph boundaries, hard-splitting any
-/// oversized paragraph with a small overlap.
+/// Chunk text semantically: split into structural blocks (paragraphs, with
+/// markdown headings starting a new block), pack blocks to ~TARGET chars, and
+/// split any oversized block on sentence boundaries. Keeps chunks aligned to
+/// meaning, which improves retrieval quality.
 pub fn chunk_text(text: &str) -> Vec<String> {
     let mut chunks: Vec<String> = Vec::new();
     let mut current = String::new();
 
-    for para in text.split("\n\n") {
-        let para = para.trim();
-        if para.is_empty() {
+    for block in split_blocks(text) {
+        let block = block.trim();
+        if block.is_empty() {
             continue;
         }
-        if para.chars().count() > MAX {
-            if !current.is_empty() {
+        if block.chars().count() > MAX {
+            if !current.trim().is_empty() {
                 chunks.push(std::mem::take(&mut current));
             }
-            chunks.extend(hard_split(para));
+            chunks.extend(pack_sentences(block));
             continue;
         }
-        if current.chars().count() + para.chars().count() > TARGET && !current.is_empty() {
+        if current.chars().count() + block.chars().count() > TARGET && !current.is_empty() {
             chunks.push(std::mem::take(&mut current));
         }
         if !current.is_empty() {
             current.push_str("\n\n");
         }
-        current.push_str(para);
+        current.push_str(block);
     }
     if !current.trim().is_empty() {
         chunks.push(current);
     }
     chunks.into_iter().filter(|c| !c.trim().is_empty()).collect()
+}
+
+/// Split text into structural blocks: blank lines separate paragraphs, and a
+/// markdown heading (or an ALL-CAPS/`:`-terminated line) starts a new block.
+fn split_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut cur = String::new();
+    for line in text.split('\n') {
+        if line.trim().is_empty() {
+            if !cur.trim().is_empty() {
+                blocks.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        let t = line.trim_start();
+        let is_heading = t.starts_with('#')
+            || (t.chars().count() < 80 && t.ends_with(':') && !t.contains(". "));
+        if is_heading && !cur.trim().is_empty() {
+            blocks.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push('\n');
+        }
+        cur.push_str(line);
+    }
+    if !cur.trim().is_empty() {
+        blocks.push(cur);
+    }
+    blocks
+}
+
+/// Pack a large block into ~TARGET-char chunks on sentence boundaries.
+fn pack_sentences(block: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut cur = String::new();
+    for sentence in split_sentences(block) {
+        if cur.chars().count() + sentence.chars().count() > TARGET && !cur.is_empty() {
+            chunks.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(sentence.trim());
+    }
+    if !cur.trim().is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
+/// Split on sentence-ending punctuation; hard-split any monster sentence.
+fn split_sentences(s: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        cur.push(ch);
+        if matches!(ch, '.' | '!' | '?') && cur.trim().chars().count() > 24 {
+            sentences.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.trim().is_empty() {
+        sentences.push(cur);
+    }
+    let mut out = Vec::new();
+    for sent in sentences {
+        if sent.chars().count() > MAX {
+            out.extend(hard_split(&sent));
+        } else {
+            out.push(sent);
+        }
+    }
+    out
 }
 
 fn hard_split(s: &str) -> Vec<String> {

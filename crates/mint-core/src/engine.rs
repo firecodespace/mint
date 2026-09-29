@@ -826,7 +826,9 @@ impl MemoryEngine {
         let (dense, sparse) = self.embedders.embed_query(&req.query)?;
         let filter = build_filter(req.site_id.as_deref(), req.kind.as_ref());
 
-        let mut builder = QueryRequestBuilder::new(req.limit)
+        // Fetch a wider candidate set so we can diversify + rerank down to limit.
+        let candidate_limit = req.limit.saturating_mul(5).clamp(req.limit, 90);
+        let mut builder = QueryRequestBuilder::new(candidate_limit)
             .with_payload(WithPayloadInterface::Bool(true));
         if let Some(f) = filter {
             builder = builder.filter(f);
@@ -893,17 +895,38 @@ impl MemoryEngine {
             })
             .collect();
 
-        // Salience-weighted rerank: relevance dominates, importance breaks ties
-        // and nudges genuinely useful memories up.
+        // Rerank: relevance dominates; salience only gently breaks ties.
         if results.len() > 1 {
             let max = results.iter().map(|r| r.score).fold(f32::MIN, f32::max);
             let min = results.iter().map(|r| r.score).fold(f32::MAX, f32::min);
             let range = (max - min).max(1e-6);
             results.sort_by(|a, b| {
-                let ba = 0.75 * ((a.score - min) / range) + 0.25 * a.memory.salience;
-                let bb = 0.75 * ((b.score - min) / range) + 0.25 * b.memory.salience;
+                let ba = 0.9 * ((a.score - min) / range) + 0.1 * a.memory.salience;
+                let bb = 0.9 * ((b.score - min) / range) + 0.1 * b.memory.salience;
                 bb.partial_cmp(&ba).unwrap_or(std::cmp::Ordering::Equal)
             });
+        }
+
+        // Diversify: cap results from any one source document so a single doc
+        // can't monopolize the context (e.g. a study guide drowning your resume).
+        if results.len() > req.limit {
+            let cap = 3usize;
+            let mut per_doc: HashMap<String, usize> = HashMap::new();
+            let mut primary: Vec<SearchResult> = Vec::new();
+            let mut overflow: Vec<SearchResult> = Vec::new();
+            for r in results {
+                let key = r.memory.parent_id.clone().unwrap_or_else(|| r.memory.id.clone());
+                let c = per_doc.entry(key).or_insert(0);
+                if *c < cap {
+                    *c += 1;
+                    primary.push(r);
+                } else {
+                    overflow.push(r);
+                }
+            }
+            primary.extend(overflow);
+            primary.truncate(req.limit);
+            results = primary;
         }
 
         Ok(SearchResponse {

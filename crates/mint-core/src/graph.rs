@@ -2,6 +2,7 @@
 //! (embedding nearest-neighbours = "related") and by document structure
 //! (chunk -> document = "part_of"). Stored as edges.json in the data dir.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -35,6 +36,9 @@ pub struct GraphData {
 pub struct GraphStore {
     path: PathBuf,
     edges: Vec<GraphEdge>,
+    /// Cached connectivity degree per node (edges touching it). Rebuilt on every
+    /// mutation so retrieval can read degrees in O(1) instead of scanning edges.
+    degree: HashMap<String, usize>,
 }
 
 impl GraphStore {
@@ -46,10 +50,25 @@ impl GraphStore {
         } else {
             Vec::new()
         };
-        Ok(Self { path, edges })
+        let mut g = Self {
+            path,
+            edges,
+            degree: HashMap::new(),
+        };
+        g.reindex();
+        Ok(g)
     }
 
-    fn save(&self) -> Result<()> {
+    fn reindex(&mut self) {
+        self.degree.clear();
+        for e in &self.edges {
+            *self.degree.entry(e.from.clone()).or_insert(0) += 1;
+            *self.degree.entry(e.to.clone()).or_insert(0) += 1;
+        }
+    }
+
+    fn save(&mut self) -> Result<()> {
+        self.reindex();
         let bytes = serde_json::to_vec(&self.edges)?;
         std::fs::write(&self.path, bytes).context("write edges.json")?;
         Ok(())
@@ -57,6 +76,16 @@ impl GraphStore {
 
     pub fn all(&self) -> &[GraphEdge] {
         &self.edges
+    }
+
+    /// Connectivity degree of one node (O(1)).
+    pub fn degree(&self, id: &str) -> usize {
+        self.degree.get(id).copied().unwrap_or(0)
+    }
+
+    /// Snapshot of all degrees (for full listings).
+    pub fn degrees(&self) -> HashMap<String, usize> {
+        self.degree.clone()
     }
 
     /// Replace the "related" edges originating from `from` with edges to `tos`.
@@ -92,11 +121,29 @@ impl GraphStore {
     }
 
     pub fn add_part_of(&mut self, chunk: &str, document: &str) -> Result<()> {
-        self.edges.push(GraphEdge {
-            from: chunk.to_string(),
-            to: document.to_string(),
-            relation: "part_of".into(),
-        });
+        self.add_part_of_many(&[chunk.to_string()], document)
+    }
+
+    /// Link many chunks to their document with a single write (ingestion).
+    pub fn add_part_of_many(&mut self, chunks: &[String], document: &str) -> Result<()> {
+        for c in chunks {
+            self.edges.push(GraphEdge {
+                from: c.clone(),
+                to: document.to_string(),
+                relation: "part_of".into(),
+            });
+        }
+        self.save()
+    }
+
+    /// Point every in_topic edge that targets `from` at `into` (topic merge).
+    pub fn retarget_topic(&mut self, from: &str, into: &str) -> Result<()> {
+        for e in self.edges.iter_mut() {
+            if e.relation == "in_topic" && e.to == from {
+                e.to = into.to_string();
+            }
+        }
+        self.edges.retain(|e| !(e.relation == "in_topic" && e.from == e.to));
         self.save()
     }
 

@@ -126,3 +126,34 @@ pub fn extract(ollama: &Ollama, model: &str, text: &str) -> Result<Vec<Extracted
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{is_temporal_or_filler, normalize};
+
+    #[test]
+    fn dates_and_filler_are_rejected() {
+        for s in [
+            "January", "this week", "end of year", "Friday", "2026", "12/5", "9:30",
+            "January 2026", "deadline", "Project Deadline Approach", "goal",
+        ] {
+            assert!(is_temporal_or_filler(s), "should reject: {s}");
+        }
+    }
+
+    #[test]
+    fn real_entities_are_kept() {
+        for s in [
+            "Kepler", "Xarch Labs", "CoreSum", "Gaussian Process", "Stanford University",
+            "Yamaha", "SEVIS", "Marchetti", "Mayo Clinic",
+        ] {
+            assert!(!is_temporal_or_filler(s), "should keep: {s}");
+        }
+    }
+
+    #[test]
+    fn normalize_merges_aliases() {
+        assert_eq!(normalize("Stanford University"), normalize("stanford"));
+        assert_eq!(normalize("Xarch Labs, Inc."), normalize("xarch labs"));
+    }
+}

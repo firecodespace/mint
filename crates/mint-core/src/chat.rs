@@ -272,3 +272,42 @@ return {{\"memories\":[]}}."
         .collect();
     Ok(memories)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_query_only;
+
+    #[test]
+    fn statements_are_captured() {
+        for s in [
+            "My name is Yash",
+            "I work at Xarch Labs as the founder",
+            "I decided to use Rust for the backend",
+            "My exam is on Friday",
+            "We moved the launch to October",
+            "Started learning piano this week",
+        ] {
+            assert!(!is_query_only(s), "should capture: {s}");
+        }
+    }
+
+    #[test]
+    fn questions_and_commands_are_not_captured() {
+        for s in [
+            "check from my resume",
+            "what type of internships are best for me?",
+            "tell me about my projects",
+            "how does HCMA work",
+            "summarize my exoplanet research",
+            "hi",
+            "thanks",
+            "What's my name?",
+            "explain OPT",
+            "set a deadline for bringing our benchmarks for core-sum by the end of this week",
+            "schedule a call with the DSO next Tuesday",
+            "can you set a deadline for friday",
+        ] {
+            assert!(is_query_only(s), "should NOT capture: {s}");
+        }
+    }
+}

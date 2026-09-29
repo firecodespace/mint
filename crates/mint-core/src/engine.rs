@@ -172,6 +172,13 @@ impl MemoryEngine {
 
     /// Create a new memory from user/agent input, embed and store it.
     pub fn add(&self, input: NewMemory) -> Result<Memory> {
+        self.add_opts(input, true)
+    }
+
+    /// `add` with control over the disk flush. Batched paths (document
+    /// ingestion) pass `flush = false` and flush once at the end: updates are
+    /// searchable in memory immediately; the flush only makes them durable.
+    fn add_opts(&self, input: NewMemory, flush: bool) -> Result<Memory> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = ulid::Ulid::generate().to_string();
         // Local-only memories and entity hubs never sync; everything else is
@@ -208,9 +215,11 @@ impl MemoryEngine {
             done: false,
         };
         self.upsert(&memory)?;
-        self.shard
-            .flush()
-            .map_err(|e| anyhow!("flush failed: {e}"))?;
+        if flush {
+            self.shard
+                .flush()
+                .map_err(|e| anyhow!("flush failed: {e}"))?;
+        }
         // Establish semantic relationships (skip chunks: they connect via
         // part_of; skip entities and topics: they are hubs connected via
         // mentions / in_topic).
@@ -322,16 +331,26 @@ impl MemoryEngine {
 
     /// Insert or update a memory by its stable id (idempotent upsert).
     pub fn upsert(&self, mem: &Memory) -> Result<()> {
-        let (dense, sparse) = self.embedders.embed_document(&mem.text)?;
-        let pid = point_id(&mem.id)?;
-        let vectors = Vectors::new_named(vec![
-            (DENSE_NAME, Vector::new_dense(dense)),
-            (SPARSE_NAME, Vector::from(sparse)),
-        ]);
-        let payload = serde_json::to_value(mem).context("failed to serialize memory payload")?;
-        let point = PointStruct::new(pid, vectors, payload);
-        let points: Vec<PointStructPersisted> = vec![point.into()];
+        self.upsert_many(std::slice::from_ref(mem))
+    }
 
+    /// Batched upsert: one batched embedding call and one shard update for all.
+    fn upsert_many(&self, mems: &[Memory]) -> Result<()> {
+        if mems.is_empty() {
+            return Ok(());
+        }
+        let texts: Vec<String> = mems.iter().map(|m| m.text.clone()).collect();
+        let vectors = self.embedders.embed_documents(&texts)?;
+        let mut points: Vec<PointStructPersisted> = Vec::with_capacity(mems.len());
+        for (mem, (dense, sparse)) in mems.iter().zip(vectors) {
+            let named = Vectors::new_named(vec![
+                (DENSE_NAME, Vector::new_dense(dense)),
+                (SPARSE_NAME, Vector::from(sparse)),
+            ]);
+            let payload =
+                serde_json::to_value(mem).context("failed to serialize memory payload")?;
+            points.push(PointStruct::new(point_id(&mem.id)?, named, payload).into());
+        }
         self.shard
             .update(UpdateOperation::PointOperation(
                 PointOperations::UpsertPoints(PointInsertOperations::PointsList(points)),
@@ -394,6 +413,16 @@ impl MemoryEngine {
     /// re-embed). Returns the topic id it was filed under, or None on failure.
     /// `text` grounds routing; `model` (may be empty) names a new topic.
     pub fn route_and_assign(&self, mem_id: &str, text: &str, model: &str) -> Option<String> {
+        self.route_and_assign_opts(mem_id, text, model, true)
+    }
+
+    fn route_and_assign_opts(
+        &self,
+        mem_id: &str,
+        text: &str,
+        model: &str,
+        flush: bool,
+    ) -> Option<String> {
         let topic_id = self.route_to_topic(text, model).ok().flatten()?;
         // File the memory under the topic; touch the topic to keep it fresh.
         let _ = self.set_payload_fields(mem_id, serde_json::json!({ "topic_id": topic_id }));
@@ -404,12 +433,15 @@ impl MemoryEngine {
         if let Ok(mut g) = self.graph.lock() {
             let _ = g.add_in_topic(mem_id, &topic_id);
         }
-        let _ = self.shard.flush();
+        if flush {
+            let _ = self.shard.flush();
+        }
         Some(topic_id)
     }
 
     /// Find the nearest existing topic to `text`; if none is close enough, mint
-    /// and name a new one. Returns the chosen topic id.
+    /// and name a new one. Returns the chosen topic id. Never flushes: callers
+    /// own durability.
     fn route_to_topic(&self, text: &str, model: &str) -> Result<Option<String>> {
         let probe: String = text.chars().take(2000).collect();
         if probe.trim().is_empty() {
@@ -430,7 +462,7 @@ impl MemoryEngine {
         }
         // Nothing close: create a topic named from the content.
         let name = self.name_topic(&probe, model);
-        let topic = self.add(NewMemory {
+        let topic = self.add_opts(NewMemory {
             kind: MemoryKind::Topic,
             title: name.clone(),
             text: name,
@@ -443,7 +475,7 @@ impl MemoryEngine {
             parent_id: None,
             topic_id: None,
             due_at: None,
-        })?;
+        }, false)?;
         Ok(Some(topic.id))
     }
 
@@ -510,10 +542,14 @@ no explanation.";
         // under the same topic so a research effort stays coherent.
         let doc_topic = self.route_and_assign(&doc.id, text, entity_model);
 
-        let chunks = documents::chunk_text(text);
-        let n = chunks.len();
-        for (i, chunk) in chunks.into_iter().enumerate() {
-            let stored = self.add(NewMemory {
+        // Chunks are stored in ONE batch: a single batched embedding call, one
+        // upsert, one flush, and one edge-file write (instead of per chunk).
+        let now = chrono::Utc::now().to_rfc3339();
+        let chunk_mems: Vec<Memory> = documents::chunk_text(text)
+            .into_iter()
+            .enumerate()
+            .map(|(i, chunk)| Memory {
+                id: ulid::Ulid::generate().to_string(),
                 kind: MemoryKind::DocChunk,
                 title: format!("{filename} [{}]", i + 1),
                 text: chunk,
@@ -522,14 +558,28 @@ no explanation.";
                 geo: None,
                 tags: Vec::new(),
                 source: MemorySource::File,
+                captured_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                salience: 0.0,
                 sensitivity: Sensitivity::Shareable,
+                sync_state: SyncState::Pending,
+                version: 1,
                 parent_id: Some(doc.id.clone()),
                 topic_id: doc_topic.clone(),
+                archived: false,
                 due_at: None,
-            })?;
-            if let Ok(mut g) = self.graph.lock() {
-                let _ = g.add_part_of(&stored.id, &doc.id);
-            }
+                done: false,
+            })
+            .collect();
+        let n = chunk_mems.len();
+        self.upsert_many(&chunk_mems)?;
+        self.shard
+            .flush()
+            .map_err(|e| anyhow!("flush failed: {e}"))?;
+        if let Ok(mut g) = self.graph.lock() {
+            let ids: Vec<String> = chunk_mems.iter().map(|m| m.id.clone()).collect();
+            let _ = g.add_part_of_many(&ids, &doc.id);
         }
         // Link the document to the entities it mentions (best-effort).
         if !entity_model.is_empty() {
@@ -539,11 +589,7 @@ no explanation.";
     }
 
     pub fn list_documents(&self) -> Result<Vec<Memory>> {
-        Ok(self
-            .list()?
-            .into_iter()
-            .filter(|m| m.kind == MemoryKind::Document)
-            .collect())
+        self.list_kind(MemoryKind::Document)
     }
 
     /// Delete a document node and all of its chunks.
@@ -973,39 +1019,12 @@ no explanation.";
             .query(builder.build())
             .map_err(|e| anyhow!("query failed: {e}"))?;
 
-        let (archived, tombstoned, access) = self
-            .meta
-            .lock()
-            .map(|m| {
-                (
-                    m.archived_ids().clone(),
-                    m.tombstones()
-                        .keys()
-                        .cloned()
-                        .collect::<std::collections::HashSet<_>>(),
-                    m.access_snapshot(),
-                )
-            })
-            .unwrap_or_default();
-        let deg = self.degrees();
-        let mut results: Vec<SearchResult> = scored
-            .into_iter()
-            .filter_map(|sp| {
-                let mut memory = memory_from_payload(sp.payload.as_ref())?;
-                if archived.contains(&memory.id) || tombstoned.contains(&memory.id) {
-                    return None;
-                }
-                memory.salience = salience_of(
-                    &memory,
-                    deg.get(&memory.id).copied().unwrap_or(0),
-                    access.get(&memory.id).copied().unwrap_or(0),
-                );
-                Some(SearchResult {
-                    memory,
-                    score: sp.score,
-                })
-            })
-            .collect();
+        let mut results = self.hydrate(
+            scored
+                .into_iter()
+                .filter_map(|sp| Some((memory_from_payload(sp.payload.as_ref())?, sp.score)))
+                .collect(),
+        );
 
         // Rerank: relevance dominates; salience only gently breaks ties.
         if results.len() > 1 {
@@ -1200,32 +1219,71 @@ no explanation.";
             .shard
             .query(builder.build())
             .map_err(|e| anyhow!("doc query failed: {e}"))?;
-        let (archived, tombstoned) = self
-            .meta
-            .lock()
-            .map(|m| {
-                (
-                    m.archived_ids().clone(),
-                    m.tombstones()
-                        .keys()
-                        .cloned()
-                        .collect::<std::collections::HashSet<_>>(),
-                )
-            })
-            .unwrap_or_default();
-        Ok(scored
-            .into_iter()
-            .filter_map(|sp| {
-                let memory = memory_from_payload(sp.payload.as_ref())?;
-                if archived.contains(&memory.id) || tombstoned.contains(&memory.id) {
-                    return None;
-                }
-                Some(SearchResult {
-                    memory,
-                    score: sp.score,
+        Ok(self.hydrate(
+            scored
+                .into_iter()
+                .filter_map(|sp| Some((memory_from_payload(sp.payload.as_ref())?, sp.score)))
+                .collect(),
+        ))
+    }
+
+    /// Drop archived/tombstoned hits and attach live salience. Takes each
+    /// side-store lock once and reads per-hit values (no per-query cloning of
+    /// the archive / tombstone / access sets).
+    fn hydrate(&self, hits: Vec<(Memory, f32)>) -> Vec<SearchResult> {
+        let hits: Vec<(Memory, f32, u32)> = match self.meta.lock() {
+            Ok(m) => hits
+                .into_iter()
+                .filter(|(mem, _)| !m.is_archived(&mem.id) && !m.is_tombstoned(&mem.id))
+                .map(|(mem, s)| {
+                    let a = m.access_count(&mem.id);
+                    (mem, s, a)
                 })
+                .collect(),
+            Err(_) => hits.into_iter().map(|(m, s)| (m, s, 0)).collect(),
+        };
+        let graph = self.graph.lock().ok();
+        hits.into_iter()
+            .map(|(mut memory, score, access)| {
+                let deg = graph.as_ref().map(|g| g.degree(&memory.id)).unwrap_or(0);
+                memory.salience = salience_of(&memory, deg, access);
+                SearchResult { memory, score }
             })
-            .collect())
+            .collect()
+    }
+
+    /// All live memories of one kind, via the indexed `kind` payload filter
+    /// (avoids scrolling and deserializing the whole store).
+    pub fn list_kind(&self, kind: MemoryKind) -> Result<Vec<Memory>> {
+        let req = ScrollRequestBuilder::new()
+            .limit(SCROLL_ALL_LIMIT)
+            .filter(Filter {
+                must: Some(vec![Condition::Field(FieldCondition::new_match(
+                    jpath("kind"),
+                    Match::from(kind_str(&kind)),
+                ))]),
+                ..Default::default()
+            })
+            .with_payload(WithPayloadInterface::Bool(true))
+            .build();
+        let (records, _next) = self
+            .shard
+            .scroll(req)
+            .map_err(|e| anyhow!("scroll failed: {e}"))?;
+        let mut out: Vec<Memory> = {
+            let meta = self.meta.lock().map_err(|_| anyhow!("meta poisoned"))?;
+            records
+                .into_iter()
+                .filter_map(|r| memory_from_payload(r.payload.as_ref()))
+                .filter(|m| !meta.is_tombstoned(&m.id))
+                .map(|mut m| {
+                    m.archived = meta.is_archived(&m.id);
+                    m
+                })
+                .collect()
+        };
+        out.sort_by(|a, b| b.id.cmp(&a.id));
+        Ok(out)
     }
 
     /// All memories, newest first.
@@ -1284,14 +1342,7 @@ no explanation.";
 
     /// Connectivity degree per node id (edges touching it).
     fn degrees(&self) -> HashMap<String, usize> {
-        let mut d = HashMap::new();
-        if let Ok(g) = self.graph.lock() {
-            for e in g.all() {
-                *d.entry(e.from.clone()).or_insert(0) += 1;
-                *d.entry(e.to.clone()).or_insert(0) += 1;
-            }
-        }
-        d
+        self.graph.lock().map(|g| g.degrees()).unwrap_or_default()
     }
 
     pub fn stats(&self) -> Result<Stats> {
@@ -1458,4 +1509,34 @@ fn kind_str(kind: &MemoryKind) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_label, heuristic_label, is_self_referential};
+
+    #[test]
+    fn self_reference_detection() {
+        assert!(is_self_referential("what type of internships are best for me?"));
+        assert!(is_self_referential("what are my strengths"));
+        assert!(is_self_referential("should I apply"));
+        assert!(!is_self_referential("what is the TCS gap in coresum"));
+        assert!(!is_self_referential("summarize the study guide"));
+        // "i" must be a whole word, not a letter inside another word.
+        assert!(!is_self_referential("kepler mission timeline"));
+    }
+
+    #[test]
+    fn labels_are_cleaned() {
+        assert_eq!(clean_label("\"Exoplanet Transit Research\"\n"), "Exoplanet Transit Research");
+        assert_eq!(clean_label("\n\n**Piano Practice**."), "Piano Practice");
+        assert_eq!(clean_label("one two three four five six seven").split(' ').count(), 5);
+    }
+
+    #[test]
+    fn heuristic_label_falls_back() {
+        assert_eq!(heuristic_label("the and for"), "General");
+        let l = heuristic_label("Practicing piano scales every day");
+        assert!(l.starts_with("Practicing"), "{l}");
+    }
 }

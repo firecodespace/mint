@@ -1,0 +1,865 @@
+{
+  "label": "v1-perf",
+  "when": "2026-09-29T21:59:22.932177400+00:00",
+  "llm": "",
+  "k": 6,
+  "ingest": {
+    "docs": 6,
+    "chunks": 12,
+    "notes": 14,
+    "docs_ms": 1066.1051,
+    "notes_ms": 1108.3673000000001,
+    "chunks_per_sec": 11.255925893235105,
+    "maintenance_ms": 0.0
+  },
+  "topics": {
+    "predicted": 13,
+    "true": 8,
+    "unrouted": 0,
+    "pair_precision": 1.0,
+    "pair_recall": 0.5789473684210527,
+    "pair_f1": 0.7333333333333334,
+    "listing": [
+      {
+        "name": "Decided Denoise Light",
+        "members": [
+          "n_exo2"
+        ]
+      },
+      {
+        "name": "Tried Kepler Light",
+        "members": [
+          "n_exo1"
+        ]
+      },
+      {
+        "name": "Expires Need Request",
+        "members": [
+          "n_usa1"
+        ]
+      },
+      {
+        "name": "Physics Informed Transit",
+        "members": [
+          "exo_doc"
+        ]
+      },
+      {
+        "name": "Coresum Budgeted Video",
+        "members": [
+          "coresum_doc",
+          "n_cs1",
+          "n_cs2",
+          "n_cs3"
+        ]
+      },
+      {
+        "name": "Weeknight Recipes Lemon",
+        "members": [
+          "cooking_doc",
+          "n_c1"
+        ]
+      },
+      {
+        "name": "Hierarchical Cognitive Memory",
+        "members": [
+          "hcma_doc",
+          "n_h1"
+        ]
+      },
+      {
+        "name": "Running Three Times",
+        "members": [
+          "n_f1"
+        ]
+      },
+      {
+        "name": "Want Submit Exoplanet",
+        "members": [
+          "n_exo3"
+        ]
+      },
+      {
+        "name": "Want Learn Piano",
+        "members": [
+          "n_p1",
+          "n_p2",
+          "n_p3"
+        ]
+      },
+      {
+        "name": "Studying United States",
+        "members": [
+          "usa_doc"
+        ]
+      },
+      {
+        "name": "Yash Bendresh Computer",
+        "members": [
+          "resume_doc"
+        ]
+      },
+      {
+        "name": "Deadlift Focusing Form",
+        "members": [
+          "n_f2"
+        ]
+      }
+    ]
+  },
+  "capture": {
+    "accuracy": 0.9166666666666666,
+    "failures": [
+      {
+        "text": "set a deadline for bringing our benchmarks for core-sum by the end of this week",
+        "expected_capture": false
+      },
+      {
+        "text": "schedule a call with the DSO next Tuesday",
+        "expected_capture": false
+      }
+    ]
+  },
+  "pipelines": {
+    "search": {
+      "recall": 0.925,
+      "mrr": 0.95,
+      "ndcg": 0.8822628066671836,
+      "hit1": 0.9,
+      "precision": 0.4833333333333334,
+      "p50_ms": 4.3201,
+      "p95_ms": 5.2873
+    },
+    "retrieve": {
+      "recall": 0.9125,
+      "mrr": 0.6600000000000001,
+      "ndcg": 0.6772551328820455,
+      "hit1": 0.5,
+      "precision": 0.4916666666666667,
+      "p50_ms": 7.8286999999999995,
+      "p95_ms": 9.634500000000001
+    }
+  },
+  "per_query": [
+    {
+      "pipeline": "search",
+      "id": "q01",
+      "query": "what type of internships are best for me?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.5697222754831122,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "usa_doc [chunk]",
+        "usa_doc [chunk]",
+        "n_f1 [note]",
+        "- [topic]",
+        "- [topic]",
+        "resume_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q02",
+      "query": "check from my resume what skills I have",
+      "recall": 1.0,
+      "mrr": 0.5,
+      "ndcg": 0.6309297535714574,
+      "hit1": 0.0,
+      "precision": 0.16666666666666666,
+      "top": [
+        "usa_doc [chunk]",
+        "resume_doc [chunk]",
+        "usa_doc [chunk]",
+        "usa_doc [doc]",
+        "- [topic]",
+        "hcma_doc [doc]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q03",
+      "query": "what is the TCS gap in our coresum benchmarks?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.9514426589871553,
+      "hit1": 1.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "n_cs1 [note]",
+        "n_cs2 [note]",
+        "coresum_doc [chunk]",
+        "coresum_doc [doc]",
+        "- [topic]",
+        "n_cs3 [note]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q04",
+      "query": "set a deadline for bringing our benchmarks for core-sum by the end of this week",
+      "recall": 0.5,
+      "mrr": 1.0,
+      "ndcg": 0.7727357110059825,
+      "hit1": 1.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "coresum_doc [doc]",
+        "coresum_doc [chunk]",
+        "n_cs2 [note]",
+        "n_f1 [note]",
+        "coresum_doc [chunk]",
+        "n_p1 [note]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q05",
+      "query": "summarize my exoplanet research",
+      "recall": 0.5,
+      "mrr": 1.0,
+      "ndcg": 0.5027762502491551,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "exo_doc [doc]",
+        "exo_doc [chunk]",
+        "- [topic]",
+        "n_exo3 [note]",
+        "coresum_doc [doc]",
+        "coresum_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q06",
+      "query": "how do I keep my F-1 status while working an internship?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "usa_doc [chunk]",
+        "usa_doc [doc]",
+        "usa_doc [chunk]",
+        "exo_doc [chunk]",
+        "- [topic]",
+        "n_usa1 [note]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q07",
+      "query": "what did I decide about piano practice?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.804532155482531,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "n_p3 [note]",
+        "n_p2 [note]",
+        "- [topic]",
+        "n_p1 [note]",
+        "usa_doc [chunk]",
+        "- [topic]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q08",
+      "query": "how does consolidation work in HCMA?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "n_h1 [note]",
+        "hcma_doc [chunk]",
+        "hcma_doc [doc]",
+        "hcma_doc [chunk]",
+        "usa_doc [chunk]",
+        "usa_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q09",
+      "query": "SEVIS",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "usa_doc [doc]",
+        "usa_doc [chunk]",
+        "usa_doc [chunk]",
+        "- [topic]",
+        "resume_doc [doc]",
+        "resume_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q10",
+      "query": "Kepler light curve denoising",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "n_exo2 [note]",
+        "exo_doc [doc]",
+        "n_exo1 [note]",
+        "exo_doc [chunk]",
+        "- [topic]",
+        "- [topic]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q11",
+      "query": "what are my goals for this year?",
+      "recall": 0.5,
+      "mrr": 1.0,
+      "ndcg": 0.8262346571285599,
+      "hit1": 1.0,
+      "precision": 0.16666666666666666,
+      "top": [
+        "n_p1 [note]",
+        "n_f1 [note]",
+        "- [topic]",
+        "coresum_doc [chunk]",
+        "- [topic]",
+        "n_p2 [note]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q12",
+      "query": "Ridge regression scorer grid budget",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "coresum_doc [chunk]",
+        "coresum_doc [chunk]",
+        "coresum_doc [doc]",
+        "- [topic]",
+        "usa_doc [chunk]",
+        "exo_doc [doc]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q13",
+      "query": "what is my coresum TCS score right now?",
+      "recall": 1.0,
+      "mrr": 0.5,
+      "ndcg": 0.6590018048024133,
+      "hit1": 0.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "n_cs2 [note]",
+        "n_cs1 [note]",
+        "coresum_doc [doc]",
+        "- [topic]",
+        "coresum_doc [chunk]",
+        "coresum_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q14",
+      "query": "what are my strengths as an engineer?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "resume_doc [doc]",
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "n_f2 [note]",
+        "- [topic]",
+        "- [topic]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q15",
+      "query": "how slow is coresum inference?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.9639404333166532,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "n_cs3 [note]",
+        "- [topic]",
+        "coresum_doc [doc]",
+        "n_cs2 [note]",
+        "n_cs1 [note]",
+        "coresum_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q16",
+      "query": "what keyboard did I buy?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.16666666666666666,
+      "top": [
+        "n_p3 [note]",
+        "- [topic]",
+        "n_p1 [note]",
+        "- [topic]",
+        "- [topic]",
+        "n_p2 [note]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q17",
+      "query": "how fast is my 5k?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.16666666666666666,
+      "top": [
+        "n_f1 [note]",
+        "n_cs3 [note]",
+        "n_cs2 [note]",
+        "n_cs1 [note]",
+        "- [topic]",
+        "- [topic]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q18",
+      "query": "what is OPT and when can I apply?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "usa_doc [chunk]",
+        "n_usa1 [note]",
+        "usa_doc [doc]",
+        "usa_doc [chunk]",
+        "- [topic]",
+        "- [topic]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q19",
+      "query": "where should I submit my exoplanet paper?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.9639404333166532,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "n_exo3 [note]",
+        "- [topic]",
+        "exo_doc [doc]",
+        "exo_doc [chunk]",
+        "resume_doc [chunk]",
+        "resume_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "search",
+      "id": "q20",
+      "query": "episodic versus semantic memory",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "hcma_doc [chunk]",
+        "n_h1 [note]",
+        "hcma_doc [doc]",
+        "- [topic]",
+        "hcma_doc [chunk]",
+        "resume_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q01",
+      "query": "what type of internships are best for me?",
+      "recall": 1.0,
+      "mrr": 0.3333333333333333,
+      "ndcg": 0.5196610607458307,
+      "hit1": 0.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "exo_doc [chunk]",
+        "exo_doc [chunk]",
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "usa_doc [chunk]",
+        "usa_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q02",
+      "query": "check from my resume what skills I have",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.3333333333333333,
+      "top": [
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "usa_doc [chunk]",
+        "usa_doc [chunk]",
+        "usa_doc [doc]",
+        "- [topic]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q03",
+      "query": "what is the TCS gap in our coresum benchmarks?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.9143091486983557,
+      "hit1": 1.0,
+      "precision": 0.8333333333333334,
+      "top": [
+        "coresum_doc [chunk]",
+        "coresum_doc [chunk]",
+        "n_cs1 [note]",
+        "n_cs2 [note]",
+        "coresum_doc [doc]",
+        "- [topic]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q04",
+      "query": "set a deadline for bringing our benchmarks for core-sum by the end of this week",
+      "recall": 0.25,
+      "mrr": 0.3333333333333333,
+      "ndcg": 0.2575785703353275,
+      "hit1": 0.0,
+      "precision": 0.3333333333333333,
+      "top": [
+        "exo_doc [chunk]",
+        "exo_doc [chunk]",
+        "coresum_doc [chunk]",
+        "coresum_doc [chunk]",
+        "resume_doc [chunk]",
+        "resume_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q05",
+      "query": "summarize my exoplanet research",
+      "recall": 0.5,
+      "mrr": 0.3333333333333333,
+      "ndcg": 0.2720328988821387,
+      "hit1": 0.0,
+      "precision": 0.5,
+      "top": [
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "exo_doc [doc]",
+        "exo_doc [chunk]",
+        "- [topic]",
+        "n_exo3 [note]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q06",
+      "query": "how do I keep my F-1 status while working an internship?",
+      "recall": 1.0,
+      "mrr": 0.3333333333333333,
+      "ndcg": 0.5,
+      "hit1": 0.0,
+      "precision": 0.5,
+      "top": [
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "usa_doc [chunk]",
+        "usa_doc [doc]",
+        "usa_doc [chunk]",
+        "exo_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q07",
+      "query": "what did I decide about piano practice?",
+      "recall": 1.0,
+      "mrr": 0.3333333333333333,
+      "ndcg": 0.5200371319485427,
+      "hit1": 0.0,
+      "precision": 0.5,
+      "top": [
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "n_p3 [note]",
+        "n_p2 [note]",
+        "- [topic]",
+        "n_p1 [note]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q08",
+      "query": "how does consolidation work in HCMA?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "n_h1 [note]",
+        "hcma_doc [chunk]",
+        "hcma_doc [doc]",
+        "hcma_doc [chunk]",
+        "usa_doc [chunk]",
+        "usa_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q09",
+      "query": "SEVIS",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "usa_doc [doc]",
+        "usa_doc [chunk]",
+        "usa_doc [chunk]",
+        "- [topic]",
+        "resume_doc [doc]",
+        "resume_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q10",
+      "query": "Kepler light curve denoising",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "n_exo2 [note]",
+        "exo_doc [doc]",
+        "n_exo1 [note]",
+        "exo_doc [chunk]",
+        "- [topic]",
+        "- [topic]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q11",
+      "query": "what are my goals for this year?",
+      "recall": 0.5,
+      "mrr": 0.2,
+      "ndcg": 0.3196311965446524,
+      "hit1": 0.0,
+      "precision": 0.16666666666666666,
+      "top": [
+        "exo_doc [chunk]",
+        "exo_doc [chunk]",
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "n_p1 [note]",
+        "n_f1 [note]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q12",
+      "query": "Ridge regression scorer grid budget",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "coresum_doc [chunk]",
+        "coresum_doc [chunk]",
+        "coresum_doc [doc]",
+        "- [topic]",
+        "usa_doc [chunk]",
+        "exo_doc [doc]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q13",
+      "query": "what is my coresum TCS score right now?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.5697222754831122,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "coresum_doc [chunk]",
+        "coresum_doc [chunk]",
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "n_cs2 [note]",
+        "n_cs1 [note]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q14",
+      "query": "what are my strengths as an engineer?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "hit1": 1.0,
+      "precision": 0.5,
+      "top": [
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "resume_doc [doc]",
+        "n_f2 [note]",
+        "- [topic]",
+        "- [topic]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q15",
+      "query": "how slow is coresum inference?",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.6885288809404666,
+      "hit1": 1.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "coresum_doc [chunk]",
+        "coresum_doc [chunk]",
+        "n_cs3 [note]",
+        "- [topic]",
+        "coresum_doc [doc]",
+        "n_cs2 [note]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q16",
+      "query": "what keyboard did I buy?",
+      "recall": 1.0,
+      "mrr": 0.3333333333333333,
+      "ndcg": 0.5,
+      "hit1": 0.0,
+      "precision": 0.16666666666666666,
+      "top": [
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "n_p3 [note]",
+        "- [topic]",
+        "n_p1 [note]",
+        "- [topic]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q17",
+      "query": "how fast is my 5k?",
+      "recall": 1.0,
+      "mrr": 0.3333333333333333,
+      "ndcg": 0.5,
+      "hit1": 0.0,
+      "precision": 0.16666666666666666,
+      "top": [
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "n_f1 [note]",
+        "n_cs3 [note]",
+        "n_cs2 [note]",
+        "n_cs1 [note]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q18",
+      "query": "what is OPT and when can I apply?",
+      "recall": 1.0,
+      "mrr": 0.3333333333333333,
+      "ndcg": 0.5,
+      "hit1": 0.0,
+      "precision": 0.5,
+      "top": [
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "usa_doc [chunk]",
+        "n_usa1 [note]",
+        "usa_doc [doc]",
+        "usa_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q19",
+      "query": "where should I submit my exoplanet paper?",
+      "recall": 1.0,
+      "mrr": 0.3333333333333333,
+      "ndcg": 0.5196610607458307,
+      "hit1": 0.0,
+      "precision": 0.5,
+      "top": [
+        "resume_doc [chunk]",
+        "resume_doc [chunk]",
+        "n_exo3 [note]",
+        "- [topic]",
+        "exo_doc [doc]",
+        "exo_doc [chunk]"
+      ]
+    },
+    {
+      "pipeline": "retrieve",
+      "id": "q20",
+      "query": "episodic versus semantic memory",
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.9639404333166532,
+      "hit1": 1.0,
+      "precision": 0.6666666666666666,
+      "top": [
+        "hcma_doc [chunk]",
+        "hcma_doc [chunk]",
+        "n_h1 [note]",
+        "hcma_doc [doc]",
+        "- [topic]",
+        "resume_doc [chunk]"
+      ]
+    }
+  ]
+}

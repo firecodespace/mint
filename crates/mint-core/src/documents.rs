@@ -215,3 +215,37 @@ fn hard_split(s: &str) -> Vec<String> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{chunk_text, MAX};
+
+    #[test]
+    fn chunks_respect_max_and_keep_content() {
+        let para = "Sentence about transit photometry and stellar variability. ".repeat(40);
+        let text = format!("# Heading\n\n{para}\n\n## Second\n\nShort tail paragraph.");
+        let chunks = chunk_text(&text);
+        assert!(chunks.len() >= 2, "long text should split");
+        for c in &chunks {
+            assert!(c.chars().count() <= MAX, "chunk over MAX: {}", c.chars().count());
+            assert!(!c.trim().is_empty());
+        }
+        let joined = chunks.join(" ");
+        assert!(joined.contains("Short tail paragraph"));
+        assert!(joined.contains("# Heading"));
+    }
+
+    #[test]
+    fn small_text_is_one_chunk() {
+        assert_eq!(chunk_text("just one line").len(), 1);
+        assert!(chunk_text("   \n\n  ").is_empty());
+    }
+
+    #[test]
+    fn unbroken_text_is_hard_split() {
+        let blob = "x".repeat(5000);
+        let chunks = chunk_text(&blob);
+        assert!(chunks.len() >= 5);
+        assert!(chunks.iter().all(|c| c.chars().count() <= MAX));
+    }
+}

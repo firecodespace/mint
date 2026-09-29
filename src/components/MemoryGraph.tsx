@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { graphData } from "../api";
-import type { GraphData, Memory } from "../types";
+import {
+  graphData,
+  listTopics,
+  mergeTopics,
+  moveToTopic,
+  organizeTopics,
+  refreshTopic,
+  renameTopic,
+} from "../api";
+import type { GraphData, Memory, TopicInfo } from "../types";
 
 interface Node {
   id: string;
@@ -8,6 +16,7 @@ interface Node {
   label: string;
   isChunk: boolean;
   salience: number;
+  topicId: string | null;
   x: number;
   y: number;
   vx: number;
@@ -116,9 +125,41 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
   const rafRef = useRef(0);
   const coolRef = useRef(0);
 
+  // Topics (schema layer): legend list, focus highlight, and override actions.
+  const [topics, setTopics] = useState<TopicInfo[]>([]);
+  const [focusTopic, setFocusTopic] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [renameVal, setRenameVal] = useState("");
+  const [mergeTarget, setMergeTarget] = useState("");
+
   useEffect(() => {
     graphData().then(setData).catch(console.error);
-  }, [memories.length]);
+    listTopics()
+      .then(setTopics)
+      .catch(() => setTopics([]));
+  }, [memories.length, reload]);
+
+  useEffect(() => {
+    setRenameVal("");
+    setMergeTarget("");
+    setActionError(null);
+  }, [selected]);
+
+  /** Run a topic action, then refetch graph + topics. */
+  async function act(kind: string, fn: () => Promise<unknown>) {
+    setBusy(kind);
+    setActionError(null);
+    try {
+      await fn();
+      setReload((r) => r + 1);
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
 
   // Build nodes/edges and settle the layout ONCE (synchronously) so the graph
   // appears already arranged instead of animating from chaos on every open.
@@ -135,6 +176,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
         label: node.label,
         isChunk: node.kind === "doc_chunk",
         salience: node.salience,
+        topicId: node.topic_id ?? null,
         x: W / 2 + Math.cos(ang) * rad,
         y: H / 2 + Math.sin(ang) * rad,
         vx: 0,
@@ -216,9 +258,12 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
       partOf: byRel["part_of"] || 0,
       mentions: byRel["mentions"] || 0,
       related: byRel["related"] || 0,
+      inTopic: byRel["in_topic"] || 0,
+      topics: byKind["topic"] || 0,
       clusters,
       recent,
       expiring,
+      forgotten: data?.archived ?? 0,
     };
   }, [data, memories]);
 
@@ -327,6 +372,13 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
   }
 
   const sel = selected ? memories.find((m) => m.id === selected) : null;
+  const selTopic = selected ? topics.find((t) => t.id === selected) : undefined;
+  const selNode = selected ? byId.get(selected) : undefined;
+  const topicRows = [...topics].sort((a, b) => b.members - a.members);
+
+  /** In topic-focus mode, is this node part of the focused subject? */
+  const inFocus = (n: Node) => !focusTopic || n.id === focusTopic || n.topicId === focusTopic;
+  const focusClass = (n: Node) => (focusTopic ? (inFocus(n) ? " hot" : " dim") : "");
 
   if (!data) return <div className="graph-empty muted">Loading memory graph…</div>;
   if (nodes.length === 0) {
@@ -365,7 +417,9 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
               y1={a.y}
               x2={b.x}
               y2={b.y}
-              className={`graph-edge ${e.relation}`}
+              className={`graph-edge ${e.relation}${
+                focusTopic ? (inFocus(a) && inFocus(b) ? " hot" : " cold") : ""
+              }`}
             />
           );
         })}
@@ -376,7 +430,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
               gRefs.current.set(n.id, el);
             }}
             transform={`translate(${n.x},${n.y})`}
-            className={`graph-node ${n.kind} ${selected === n.id ? "sel" : ""}`}
+            className={`graph-node ${n.kind} ${selected === n.id ? "sel" : ""}${focusClass(n)}`}
             onMouseDown={(e) => {
               e.preventDefault();
               dragId.current = n.id;
@@ -402,11 +456,42 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
           <div className="gp-row"><i className="lg entity" /><span>Entities</span><b>{stats.entities}</b></div>
           <div className="gp-row"><i className="lg summary" /><span>Summaries</span><b>{stats.summaries}</b></div>
           <div className="gp-row"><i className="lg chunk" /><span>Chunks</span><b>{stats.chunks}</b></div>
+          <div className="gp-row"><i className="lg topic" /><span>Topics</span><b>{stats.topics}</b></div>
+        </div>
+        <div className="gp-section">
+          <h4>Topics</h4>
+          {topicRows.length === 0 && <div className="gp-empty">No topics yet</div>}
+          {topicRows.map((t) => (
+            <button
+              key={t.id}
+              className={`gp-row gp-topic ${focusTopic === t.id ? "on" : ""}`}
+              title={t.summary || t.name}
+              onClick={() => setFocusTopic(focusTopic === t.id ? null : t.id)}
+            >
+              <i className="lg topic" />
+              <span>{t.name}</span>
+              <b>{t.members}</b>
+            </button>
+          ))}
+          {focusTopic && (
+            <button className="ghost gp-action" onClick={() => setFocusTopic(null)}>
+              Show all topics
+            </button>
+          )}
+          <button
+            className="ghost gp-action"
+            disabled={!!busy}
+            onClick={() => act("organize", organizeTopics)}
+            title="File every not-yet-organized memory and document into topics, then summarize them"
+          >
+            {busy === "organize" ? "Organizing..." : "Organize memories"}
+          </button>
         </div>
         <div className="gp-section">
           <h4>Connections <b className="gp-total">{stats.connections}</b></h4>
           <div className="gp-row"><i className="lg c-part" /><span>Document source</span><b>{stats.partOf}</b></div>
           <div className="gp-row"><i className="lg c-mention" /><span>Entity mentions</span><b>{stats.mentions}</b></div>
+          <div className="gp-row"><i className="lg c-topic" /><span>Topic membership</span><b>{stats.inTopic}</b></div>
           <div className="gp-row"><i className="lg c-related" /><span>Related</span><b>{stats.related}</b></div>
         </div>
         <div className="gp-section">
@@ -417,11 +502,86 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
           <h4>Memory status</h4>
           <div className="gp-row"><i className="dot-stat recent" /><span>Recent (&lt; 24h)</span><b>{stats.recent}</b></div>
           <div className="gp-row"><i className="dot-stat expiring" /><span>Expiring soon</span><b>{stats.expiring}</b></div>
+          <div className="gp-row"><i className="dot-stat forgotten" /><span>Forgotten (archived)</span><b>{stats.forgotten}</b></div>
         </div>
+        {actionError && !selected && <div className="gp-error">{actionError}</div>}
         <div className="gp-hint">scroll to zoom · drag to pan · double-click to reset</div>
       </div>
 
-      {sel && (
+      {selTopic && (
+        <div className="graph-detail">
+          <div className="gd-head">
+            <span className="pill topic">topic</span>
+            <strong>{selTopic.name}</strong>
+            <button className="ghost" onClick={() => setSelected(null)}>
+              Close
+            </button>
+          </div>
+          <p className="gd-text">
+            {selTopic.summary || "No summary yet. Refresh to distill one from its members."}
+          </p>
+          <div className="gd-meta">
+            <span>{selTopic.members} members</span>
+            {selTopic.user_named && <span>named by you</span>}
+          </div>
+          <div className="gd-actions">
+            <div className="gd-field">
+              <input
+                value={renameVal}
+                placeholder="Rename topic"
+                onChange={(e) => setRenameVal(e.target.value)}
+              />
+              <button
+                className="ghost"
+                disabled={!renameVal.trim() || !!busy}
+                onClick={() => act("rename", () => renameTopic(selTopic.id, renameVal.trim()))}
+              >
+                Rename
+              </button>
+            </div>
+            <div className="gd-field">
+              <select value={mergeTarget} onChange={(e) => setMergeTarget(e.target.value)}>
+                <option value="">Merge into...</option>
+                {topicRows
+                  .filter((t) => t.id !== selTopic.id)
+                  .map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+              </select>
+              <button
+                className="ghost"
+                disabled={!mergeTarget || !!busy}
+                onClick={() =>
+                  act("merge", async () => {
+                    await mergeTopics(selTopic.id, mergeTarget);
+                    if (focusTopic === selTopic.id) setFocusTopic(mergeTarget);
+                    setSelected(mergeTarget);
+                  })
+                }
+              >
+                Merge
+              </button>
+            </div>
+            <div className="gd-field">
+              <button className="ghost" onClick={() => setFocusTopic(selTopic.id)}>
+                Focus
+              </button>
+              <button
+                className="ghost"
+                disabled={!!busy}
+                onClick={() => act("refresh", () => refreshTopic(selTopic.id))}
+              >
+                {busy === "refresh" ? "Summarizing..." : "Refresh summary"}
+              </button>
+            </div>
+            {actionError && <div className="gp-error">{actionError}</div>}
+          </div>
+        </div>
+      )}
+
+      {sel && !selTopic && (
         <div className="graph-detail">
           <div className="gd-head">
             <span className={`pill ${sel.kind}`}>{sel.kind}</span>
@@ -440,6 +600,28 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
             {sel.source && <span>source: {sel.source}</span>}
             <span className={`sync ${sel.sync_state}`}>{sel.sync_state}</span>
           </div>
+          {sel.kind !== "doc_chunk" && sel.kind !== "entity" && topicRows.length > 0 && (
+            <div className="gd-actions">
+              <div className="gd-field">
+                <span className="gd-label">Topic</span>
+                <select
+                  value={selNode?.topicId ?? ""}
+                  disabled={!!busy}
+                  onChange={(e) =>
+                    e.target.value && act("move", () => moveToTopic(sel.id, e.target.value))
+                  }
+                >
+                  <option value="">Unfiled</option>
+                  {topicRows.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {actionError && <div className="gp-error">{actionError}</div>}
+            </div>
+          )}
         </div>
       )}
     </div>

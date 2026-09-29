@@ -11,11 +11,13 @@ import type {
   MaintenanceReport,
   Memory,
   NewMemory,
+  OrganizeReport,
   SearchRequest,
   SearchResponse,
   Stats,
   SyncReport,
   SyncStatus,
+  TopicInfo,
 } from "./types";
 
 export function addMemory(input: NewMemory): Promise<Memory> {
@@ -118,6 +120,33 @@ export function runMaintenance(): Promise<MaintenanceReport> {
 
 export function clearArchive(): Promise<number> {
   return invoke<number>("clear_archive");
+}
+
+// ---- topics (schema layer) -----------------------------------------------
+
+export function listTopics(): Promise<TopicInfo[]> {
+  return invoke<TopicInfo[]>("list_topics");
+}
+
+export function renameTopic(id: string, name: string): Promise<void> {
+  return invoke<void>("rename_topic", { id, name });
+}
+
+export function mergeTopics(from: string, into: string): Promise<void> {
+  return invoke<void>("merge_topics", { from, into });
+}
+
+export function moveToTopic(memoryId: string, topicId: string): Promise<void> {
+  return invoke<void>("move_to_topic", { memoryId, topicId });
+}
+
+export function refreshTopic(id: string): Promise<TopicInfo> {
+  return invoke<TopicInfo>("refresh_topic", { id });
+}
+
+/** Route every not-yet-organized memory/document into topics, then summarize. */
+export function organizeTopics(): Promise<OrganizeReport> {
+  return invoke<OrganizeReport>("organize_topics");
 }
 
 // ---- timeline ------------------------------------------------------------

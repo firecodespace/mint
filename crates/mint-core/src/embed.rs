@@ -60,6 +60,31 @@ impl Embedders {
         Ok((dense, sparse))
     }
 
+    /// Embed many documents in one batched ONNX call (much faster than one at a
+    /// time for document ingestion).
+    pub fn embed_documents(&self, texts: &[String]) -> Result<Vec<(Vec<f32>, SparseVector)>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dense = {
+            let mut model = self
+                .dense
+                .lock()
+                .map_err(|_| anyhow::anyhow!("dense embedder mutex poisoned"))?;
+            model
+                .embed(texts.to_vec(), Some(32))
+                .context("batch dense embedding failed")?
+        };
+        if dense.len() != texts.len() {
+            anyhow::bail!("batch embedding returned {} of {} vectors", dense.len(), texts.len());
+        }
+        Ok(dense
+            .into_iter()
+            .zip(texts)
+            .map(|(d, t)| (d, self.sparse.embed_document(t)))
+            .collect())
+    }
+
     /// Embed a query (to search). Sparse uses BM25 query (unit) weighting.
     pub fn embed_query(&self, text: &str) -> Result<(Vec<f32>, SparseVector)> {
         let dense = self.embed_dense(text)?;

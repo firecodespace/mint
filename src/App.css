@@ -1159,6 +1159,89 @@ ul {
   padding-top: 8px;
   line-height: 1.4;
 }
+.graph-panel {
+  max-height: calc(100% - 28px);
+  overflow-y: auto;
+}
+.lg.topic {
+  background: #fb7185;
+}
+.lg.c-topic {
+  background: #e08fb0;
+}
+.dot-stat.forgotten {
+  background: #64748b;
+}
+button.gp-topic {
+  width: 100%;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 3px 5px;
+  margin: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+button.gp-topic:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+button.gp-topic.on {
+  background: rgba(251, 113, 133, 0.14);
+  color: #fda4af;
+}
+button.gp-action {
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.gp-empty {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 0 4px;
+}
+.gp-error {
+  font-size: 11px;
+  color: #fca5a5;
+  padding-top: 6px;
+  word-break: break-word;
+}
+.graph-node.dim {
+  opacity: 0.12;
+}
+.graph-node.hot circle {
+  filter: drop-shadow(0 0 6px rgba(251, 113, 133, 0.6));
+}
+.gd-actions {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.gd-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.gd-field input,
+.gd-field select {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.gd-field .ghost {
+  padding: 5px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.gd-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
 .graph-legend span {
   display: flex;
   align-items: center;

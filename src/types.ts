@@ -161,7 +161,24 @@ export interface GraphNode {
   label: string;
   kind: string;
   parent_id: string | null;
+  topic_id: string | null;
   salience: number;
+}
+
+/** An organizing subject (schema node) with its rolling summary. */
+export interface TopicInfo {
+  id: string;
+  name: string;
+  summary: string;
+  members: number;
+  user_named: boolean;
+  updated_at: string;
+}
+
+export interface OrganizeReport {
+  routed: number;
+  topics: number;
+  summarized: number;
 }
 
 export interface MaintenanceReport {
@@ -173,12 +190,14 @@ export interface MaintenanceReport {
 export interface GraphEdge {
   from: string;
   to: string;
-  relation: string; // "related" | "part_of"
+  relation: string; // "related" | "part_of" | "mentions" | "in_topic"
 }
 
 export interface GraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** Memories decayed into the archive (forgotten), excluded from the graph. */
+  archived: number;
 }
 
 export interface DocIngestResult {

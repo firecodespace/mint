@@ -191,6 +191,8 @@ impl MemoryEngine {
             version: 1,
             parent_id: input.parent_id,
             archived: false,
+            due_at: input.due_at,
+            done: false,
         };
         self.upsert(&memory)?;
         self.shard
@@ -228,6 +230,7 @@ impl MemoryEngine {
             source: MemorySource::Manual,
             sensitivity: Sensitivity::Shareable,
             parent_id: None,
+            due_at: None,
         })?;
         if let Ok(mut idx) = self.entity_index.lock() {
             idx.insert(key, entity.id.clone());
@@ -358,6 +361,7 @@ impl MemoryEngine {
             source: MemorySource::File,
             sensitivity: Sensitivity::Shareable,
             parent_id: None,
+            due_at: None,
         })?;
 
         let chunks = documents::chunk_text(&text);
@@ -374,6 +378,7 @@ impl MemoryEngine {
                 source: MemorySource::File,
                 sensitivity: Sensitivity::Shareable,
                 parent_id: Some(doc.id.clone()),
+                due_at: None,
             })?;
             if let Ok(mut g) = self.graph.lock() {
                 let _ = g.add_part_of(&stored.id, &doc.id);
@@ -646,6 +651,7 @@ impl MemoryEngine {
                     source: MemorySource::Manual,
                     sensitivity: Sensitivity::Shareable,
                     parent_id: None,
+                    due_at: None,
                 })?;
                 let _ = self
                     .meta
@@ -708,6 +714,33 @@ impl MemoryEngine {
             .lock()
             .map_err(|_| anyhow!("meta poisoned"))?
             .clear_archive()
+    }
+
+    // ---- scheduling (timeline / calendar) -------------------------------
+
+    /// Active memories that have a due date, earliest first.
+    pub fn list_scheduled(&self) -> Result<Vec<Memory>> {
+        let mut items: Vec<Memory> = self
+            .list_active()?
+            .into_iter()
+            .filter(|m| m.due_at.as_deref().map(|d| !d.is_empty()).unwrap_or(false))
+            .collect();
+        items.sort_by(|a, b| a.due_at.cmp(&b.due_at));
+        Ok(items)
+    }
+
+    /// Mark a scheduled item done / not-done.
+    pub fn set_done(&self, id: &str, done: bool) -> Result<()> {
+        let mut mem = self
+            .list()?
+            .into_iter()
+            .find(|m| m.id == id)
+            .ok_or_else(|| anyhow!("memory not found"))?;
+        mem.done = done;
+        mem.updated_at = chrono::Utc::now().to_rfc3339();
+        self.upsert(&mem)?;
+        self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
+        Ok(())
     }
 
     // ---- retrieval -------------------------------------------------------

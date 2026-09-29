@@ -110,6 +110,93 @@ fn is_junk(text: &str) -> bool {
     matches!(t.as_str(), "unknown" | "n/a" | "na" | "none" | "null" | "the user" | "user")
 }
 
+/// Today's date as YYYY-MM-DD, for resolving relative dates.
+pub fn today() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+/// Cheap guard: does the message plausibly reference a date/time/deadline?
+/// Avoids an LLM call on turns that clearly have no scheduling content.
+pub fn mentions_time(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    const HINTS: &[&str] = &[
+        "today", "tomorrow", "tonight", "yesterday", "deadline", "due", "by ", "on ",
+        "next ", "this ", "week", "month", "monday", "tuesday", "wednesday", "thursday",
+        "friday", "saturday", "sunday", "january", "february", "march", "april", "may",
+        "june", "july", "august", "september", "october", "november", "december",
+        "am ", "pm", "o'clock", "schedule", "remind", "meeting", "appointment", "submit",
+        "apply", "exam", "quarter",
+    ];
+    if HINTS.iter().any(|h| m.contains(h)) {
+        return true;
+    }
+    // A date-like number pattern (e.g. 12/5, 2026-03-01, "15th").
+    m.chars().any(|c| c.is_ascii_digit())
+        && (m.contains('/') || m.contains('-') || m.contains("th") || m.contains("st")
+            || m.contains("nd") || m.contains("rd"))
+}
+
+#[derive(Debug, Deserialize)]
+struct EventItem {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    due: String,
+    #[serde(default)]
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventResult {
+    #[serde(default)]
+    items: Vec<EventItem>,
+}
+
+/// Extract tasks/deadlines/dated events from the user's message, resolving
+/// relative dates against `today` (YYYY-MM-DD). Returns ready-to-store memories.
+pub fn extract_events(
+    ollama: &Ollama,
+    model: &str,
+    user_message: &str,
+    today: &str,
+) -> Result<Vec<NewMemory>> {
+    if !mentions_time(user_message) {
+        return Ok(Vec::new());
+    }
+    let system = format!(
+        "You extract tasks, deadlines, and dated events from the user's message. \
+Today's date is {today}. Resolve relative dates (tomorrow, Friday, next week) to an \
+absolute calendar date. Return ONLY JSON of the form \
+{{\"items\":[{{\"title\":\"short label\",\"due\":\"YYYY-MM-DD\",\"kind\":\"task|event\"}}]}}. \
+Only include items that have a real date or deadline. If none, return {{\"items\":[]}}."
+    );
+    let raw = ollama.generate(model, Some(&system), user_message, true)?;
+    let parsed: EventResult = serde_json::from_str(&raw).unwrap_or(EventResult { items: Vec::new() });
+
+    let items = parsed
+        .items
+        .into_iter()
+        .filter(|it| it.due.trim().len() >= 8 && !it.title.trim().is_empty())
+        .map(|it| {
+            let kind_tag = if it.kind == "task" { "task" } else { "event" };
+            NewMemory {
+                kind: MemoryKind::Event,
+                text: format!("{} — {} on {}", it.title, kind_tag, it.due.trim()),
+                title: it.title,
+                site_id: String::new(),
+                asset_id: String::new(),
+                geo: None,
+                tags: vec![kind_tag.to_string()],
+                source: MemorySource::Chat,
+                sensitivity: Sensitivity::Shareable,
+                parent_id: None,
+                due_at: Some(it.due.trim().to_string()),
+            }
+        })
+        .collect();
+    Ok(items)
+}
+
 /// Ask a fast local model to extract durable memories from one turn.
 /// Returns ready-to-store `NewMemory` values (source = Chat).
 pub fn extract_memories(
@@ -154,6 +241,7 @@ return {{\"memories\":[]}}."
             source: MemorySource::Chat,
             sensitivity: Sensitivity::Shareable,
             parent_id: None,
+            due_at: None,
         })
         .collect();
     Ok(memories)

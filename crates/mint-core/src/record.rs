@@ -98,6 +98,12 @@ pub struct Memory {
     /// Archived by decay: kept on disk but excluded from retrieval and the graph.
     #[serde(default)]
     pub archived: bool,
+
+    /// Scheduling: a due date (YYYY-MM-DD) for tasks/events, and done state.
+    #[serde(default)]
+    pub due_at: Option<String>,
+    #[serde(default)]
+    pub done: bool,
 }
 
 /// Input for creating a memory. The engine fills id / timestamps / the
@@ -119,6 +125,8 @@ pub struct NewMemory {
     pub sensitivity: Sensitivity,
     #[serde(default)]
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub due_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]

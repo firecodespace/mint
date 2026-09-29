@@ -6,7 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use base64::Engine as _;
-use mint_core::chat::{extract_memories, format_context, system_prompt};
+use mint_core::chat::{extract_events, extract_memories, format_context, system_prompt, today};
 use mint_core::conversations::{Conversation, ConversationStore, ConversationSummary};
 use mint_core::engine::{MaintenanceReport, SyncCounts};
 use mint_core::graph::GraphData;
@@ -128,6 +128,22 @@ pub async fn run_maintenance(state: State<'_, AppState>) -> Result<MaintenanceRe
 pub fn clear_archive(state: State<AppState>) -> Result<usize, String> {
     lock_engine(&state.engine)?
         .clear_archive()
+        .map_err(|e| e.to_string())
+}
+
+// ---- timeline / calendar -------------------------------------------------
+
+#[tauri::command]
+pub fn list_scheduled(state: State<AppState>) -> Result<Vec<Memory>, String> {
+    lock_engine(&state.engine)?
+        .list_scheduled()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_task_done(state: State<AppState>, id: String, done: bool) -> Result<(), String> {
+    lock_engine(&state.engine)?
+        .set_done(&id, done)
         .map_err(|e| e.to_string())
 }
 
@@ -388,6 +404,13 @@ pub struct CapturedItem {
 }
 
 #[derive(Serialize, Clone)]
+struct ScheduledEvent {
+    id: String,
+    title: String,
+    due_at: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
 pub struct ChatTurnResult {
     answer: String,
     retrieved: Vec<RetrievedItem>,
@@ -529,6 +552,25 @@ fn run_turn(
                 let _ = app.emit("chat:captured", item.clone());
                 captured_ids.push(m.id.clone());
                 captured.push(item);
+            }
+        }
+    }
+
+    // 3b. Detect tasks / deadlines / dated events and add them to the timeline.
+    let events = extract_events(&ollama, &fast_model, &message, &today()).unwrap_or_default();
+    if !events.is_empty() {
+        stage(&app, "scheduling", "adding to timeline");
+        let eng = lock_engine(&engine)?;
+        for nm in events {
+            if let Ok(m) = eng.add(nm) {
+                let _ = app.emit(
+                    "chat:scheduled",
+                    ScheduledEvent {
+                        id: m.id.clone(),
+                        title: m.title.clone(),
+                        due_at: m.due_at.clone(),
+                    },
+                );
             }
         }
     }

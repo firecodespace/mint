@@ -46,6 +46,7 @@ pub struct AppState {
     pub engine: Arc<Mutex<MemoryEngine>>,
     pub conversations: Arc<Mutex<ConversationStore>>,
     pub ollama: Arc<Ollama>,
+    pub sync: Arc<Mutex<SyncRuntime>>,
     pub chat_model: String,
     pub fast_model: String,
 }
@@ -155,6 +156,106 @@ pub fn delete_document(state: State<AppState>, id: String) -> Result<(), String>
     lock_engine(&state.engine)?
         .delete_document(&id)
         .map_err(|e| e.to_string())
+}
+
+// ---- sync (edge <-> cloud) -----------------------------------------------
+
+#[derive(Serialize, Clone)]
+pub struct SyncStatus {
+    pub online: bool,      // user toggle (airplane mode off = true)
+    pub reachable: bool,   // server responded
+    pub server_url: String,
+    pub counts: SyncCounts,
+    pub last_sync: Option<String>,
+    pub last_report: Option<SyncReport>,
+}
+
+fn lock_sync<'a>(
+    s: &'a Arc<Mutex<SyncRuntime>>,
+) -> Result<std::sync::MutexGuard<'a, SyncRuntime>, String> {
+    s.lock().map_err(|_| "sync runtime poisoned".to_string())
+}
+
+#[tauri::command]
+pub fn sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
+    let (online, url, api_key, last_sync, last_report) = {
+        let s = lock_sync(&state.sync)?;
+        (
+            s.online,
+            s.cfg.url.clone(),
+            s.cfg.api_key.clone(),
+            s.last_sync.clone(),
+            s.last_report.clone(),
+        )
+    };
+    // Only ping the server when "online" (airplane mode off).
+    let reachable = if online {
+        SyncClient::new(SyncConfig { url: url.clone(), api_key }).reachable()
+    } else {
+        false
+    };
+    let counts = lock_engine(&state.engine)?
+        .sync_counts()
+        .map_err(|e| e.to_string())?;
+    Ok(SyncStatus {
+        online,
+        reachable,
+        server_url: url,
+        counts,
+        last_sync,
+        last_report,
+    })
+}
+
+#[tauri::command]
+pub fn set_online(state: State<AppState>, online: bool) -> Result<(), String> {
+    lock_sync(&state.sync)?.online = online;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_server_url(state: State<AppState>, url: String) -> Result<(), String> {
+    lock_sync(&state.sync)?.cfg.url = url;
+    Ok(())
+}
+
+/// Run a two-way sync now. Requires online (airplane mode off) and a reachable server.
+#[tauri::command]
+pub async fn sync_now(state: State<'_, AppState>) -> Result<SyncReport, String> {
+    let (online, cfg) = {
+        let s = lock_sync(&state.sync)?;
+        (s.online, s.cfg.clone())
+    };
+    if !online {
+        return Err("offline (airplane mode is on)".into());
+    }
+    let engine = state.engine.clone();
+    let sync = state.sync.clone();
+
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let client = SyncClient::new(cfg);
+        if !client.reachable() {
+            return Err("Qdrant server not reachable".to_string());
+        }
+        let eng = engine.lock().map_err(|_| "engine poisoned".to_string())?;
+        eng.sync(&client).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("sync task failed: {e}"))??;
+
+    if let Ok(mut s) = lock_sync(&sync) {
+        s.last_sync = Some(chrono_now());
+        s.last_report = Some(report.clone());
+    }
+    Ok(report)
+}
+
+fn chrono_now() -> String {
+    // Lightweight RFC3339-ish timestamp without pulling chrono into this crate.
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| format!("{}", d.as_secs()))
+        .unwrap_or_default()
 }
 
 // ---- chat status ---------------------------------------------------------

@@ -24,7 +24,7 @@ use super::record::{
     Memory, MemoryKind, MemorySource, NewMemory, SearchMode, SearchRequest, SearchResponse,
     SearchResult, Sensitivity, Stats, SyncState,
 };
-use super::sync::{ServerPoint, SyncClient, SyncReport};
+use super::sync::{ServerPoint, SyncClient, SyncReport, TombstonePoint};
 use super::{documents, entities};
 
 use serde::Serialize;
@@ -107,7 +107,7 @@ impl MemoryEngine {
             if let Ok(mut idx) = self.entity_index.lock() {
                 idx.clear();
                 for m in all.iter().filter(|m| m.kind == MemoryKind::Entity) {
-                    idx.insert(m.title.trim().to_lowercase(), m.id.clone());
+                    idx.insert(entities::normalize(&m.title), m.id.clone());
                 }
             }
         }
@@ -208,9 +208,10 @@ impl MemoryEngine {
 
     // ---- entities --------------------------------------------------------
 
-    /// Find an existing entity node by name, or create one. Deduped by name.
-    fn find_or_create_entity(&self, name: &str) -> Result<String> {
-        let key = name.trim().to_lowercase();
+    /// Find an existing entity node by normalized name, or create a typed one.
+    /// Dedup key merges aliases ("Stanford" ~ "Stanford University").
+    fn find_or_create_entity(&self, name: &str, etype: &str) -> Result<String> {
+        let key = entities::normalize(name);
         if key.is_empty() {
             return Err(anyhow!("empty entity name"));
         }
@@ -219,6 +220,10 @@ impl MemoryEngine {
                 return Ok(id.clone());
             }
         }
+        let mut tags = vec!["entity".to_string()];
+        if !etype.is_empty() {
+            tags.push(etype.to_string());
+        }
         let entity = self.add(NewMemory {
             kind: MemoryKind::Entity,
             title: name.trim().to_string(),
@@ -226,7 +231,7 @@ impl MemoryEngine {
             site_id: String::new(),
             asset_id: String::new(),
             geo: None,
-            tags: vec!["entity".to_string()],
+            tags,
             source: MemorySource::Manual,
             sensitivity: Sensitivity::Shareable,
             parent_id: None,
@@ -238,13 +243,12 @@ impl MemoryEngine {
         Ok(entity.id)
     }
 
-    /// Extract entities from `text` and link `from_id` to them via "mentions".
-    /// Returns the entity ids linked.
+    /// Extract typed entities from `text` and link `from_id` to them via "mentions".
     pub fn attach_entities(&self, from_id: &str, text: &str, model: &str) -> Result<Vec<String>> {
-        let names = entities::extract(&self.ollama, model, text)?;
+        let ents = entities::extract(&self.ollama, model, text)?;
         let mut ids = Vec::new();
-        for name in names {
-            if let Ok(id) = self.find_or_create_entity(&name) {
+        for e in ents {
+            if let Ok(id) = self.find_or_create_entity(&e.name, &e.etype) {
                 if id != from_id {
                     ids.push(id);
                 }
@@ -477,24 +481,62 @@ impl MemoryEngine {
     /// leave the device. Divergences resolve last-write-wins by `updated_at`.
     pub fn sync(&self, client: &SyncClient) -> Result<SyncReport> {
         client.ensure_collection(DENSE_DIM)?;
+        client.ensure_tombstone_collection()?;
 
-        // Remote state, keyed by memory id (from payloads).
+        let mut report = SyncReport::default();
+
+        // 1. Reconcile deletions (tombstones) before content.
+        let remote_tombs = client.scroll_tombstones()?;
+        for (id, _ts) in &remote_tombs {
+            let known = self.meta.lock().map(|m| m.is_tombstoned(id)).unwrap_or(false);
+            if !known {
+                let _ = self.delete(id); // removes local point (if any) + records tombstone
+            }
+        }
+        let local_tombs: HashMap<String, String> = self
+            .meta
+            .lock()
+            .map(|m| m.tombstones().clone())
+            .unwrap_or_default();
+        if !local_tombs.is_empty() {
+            let points: Vec<TombstonePoint> = local_tombs
+                .iter()
+                .filter_map(|(id, ts)| {
+                    Some(TombstonePoint {
+                        id_uuid: uuid_string(id).ok()?,
+                        memory_id: id.clone(),
+                        deleted_at: ts.clone(),
+                    })
+                })
+                .collect();
+            let _ = client.upsert_tombstones(&points);
+            let uuids: Vec<String> = points.iter().map(|p| p.id_uuid.clone()).collect();
+            let _ = client.delete_points(&uuids);
+        }
+        let tombstoned: std::collections::HashSet<String> = local_tombs.keys().cloned().collect();
+
+        // 2. Content: remote state, keyed by memory id (from payloads).
         let mut remote: HashMap<String, Memory> = HashMap::new();
         for p in client.scroll_all()? {
             if let Ok(m) = serde_json::from_value::<Memory>(p) {
-                remote.insert(m.id.clone(), m);
+                if !tombstoned.contains(&m.id) {
+                    remote.insert(m.id.clone(), m);
+                }
             }
         }
 
-        // Local syncable memories (shareable, non-entity).
+        // Local syncable memories (shareable, non-entity, non-tombstoned).
         let local: HashMap<String, Memory> = self
             .list()?
             .into_iter()
-            .filter(|m| m.sensitivity == Sensitivity::Shareable && m.kind != MemoryKind::Entity)
+            .filter(|m| {
+                m.sensitivity == Sensitivity::Shareable
+                    && m.kind != MemoryKind::Entity
+                    && !tombstoned.contains(&m.id)
+            })
             .map(|m| (m.id.clone(), m))
             .collect();
 
-        let mut report = SyncReport::default();
         let mut to_push: Vec<Memory> = Vec::new();
         let mut to_pull: Vec<Memory> = Vec::new();
 
@@ -507,11 +549,13 @@ impl MemoryEngine {
                 (None, Some(r)) => to_pull.push(r.clone()),
                 (Some(l), Some(r)) => {
                     if l.updated_at == r.updated_at {
-                        // Already in agreement; mark synced if still pending.
+                        // Already in agreement; mark synced if still pending
+                        // (payload-only, no re-embed).
                         if l.sync_state == SyncState::Pending {
-                            let mut m = l.clone();
-                            m.sync_state = SyncState::Synced;
-                            let _ = self.upsert(&m);
+                            let _ = self.set_payload_fields(
+                                &l.id,
+                                serde_json::json!({ "sync_state": "synced" }),
+                            );
                         }
                     } else {
                         // Divergence: last write wins, but flag it as a conflict
@@ -544,8 +588,12 @@ impl MemoryEngine {
                 .filter_map(|m| self.to_server_point(m).ok())
                 .collect();
             client.upsert(&points)?;
+            // Mark local copies synced without re-embedding.
             for mm in &synced {
-                if self.upsert(mm).is_ok() {
+                if self
+                    .set_payload_fields(&mm.id, serde_json::json!({ "sync_state": "synced" }))
+                    .is_ok()
+                {
                     report.pushed += 1;
                 }
             }

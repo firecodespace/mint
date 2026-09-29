@@ -1,6 +1,7 @@
 //! The on-device memory engine: an embedded Qdrant Edge shard plus local
 //! embedders. All operations are synchronous, in-process, and offline.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -15,13 +16,25 @@ use qdrant_edge::{
     Vectors, WithPayloadInterface,
 };
 
-use super::documents;
 use super::embed::{Embedders, DENSE_DIM};
 use super::graph::{GraphData, GraphNode, GraphStore};
+use super::ollama::Ollama;
 use super::record::{
     Memory, MemoryKind, MemorySource, NewMemory, SearchMode, SearchRequest, SearchResponse,
     SearchResult, Sensitivity, Stats, SyncState,
 };
+use super::sync::{ServerPoint, SyncClient, SyncReport};
+use super::{documents, entities};
+
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SyncCounts {
+    pub pending: usize,
+    pub synced: usize,
+    pub conflict: usize,
+    pub local_only: usize,
+}
 
 /// Similarity above which two memories get a "related" edge in the graph.
 const RELATED_THRESHOLD: f32 = 0.55;
@@ -40,6 +53,9 @@ pub struct MemoryEngine {
     shard: EdgeShard,
     embedders: Embedders,
     graph: Mutex<GraphStore>,
+    ollama: Ollama,
+    /// normalized entity name -> entity memory id (dedup).
+    entity_index: Mutex<HashMap<String, String>>,
 }
 
 impl MemoryEngine {
@@ -59,9 +75,24 @@ impl MemoryEngine {
             shard,
             embedders,
             graph: Mutex::new(graph),
+            ollama: Ollama::new(),
+            entity_index: Mutex::new(HashMap::new()),
         };
         engine.ensure_indexes();
+        engine.rebuild_entity_index();
         Ok(engine)
+    }
+
+    /// Rebuild the entity name -> id map from existing Entity nodes.
+    fn rebuild_entity_index(&self) {
+        if let Ok(all) = self.list() {
+            if let Ok(mut idx) = self.entity_index.lock() {
+                idx.clear();
+                for m in all.iter().filter(|m| m.kind == MemoryKind::Entity) {
+                    idx.insert(m.title.trim().to_lowercase(), m.id.clone());
+                }
+            }
+        }
     }
 
     fn open_shard(shard_dir: &Path) -> Result<EdgeShard> {
@@ -114,6 +145,15 @@ impl MemoryEngine {
     pub fn add(&self, input: NewMemory) -> Result<Memory> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = ulid::Ulid::generate().to_string();
+        // Local-only memories and entity hubs never sync; everything else is
+        // queued as pending for the next sync.
+        let sync_state = if input.sensitivity == Sensitivity::LocalOnly
+            || input.kind == MemoryKind::Entity
+        {
+            SyncState::LocalOnly
+        } else {
+            SyncState::Pending
+        };
         let memory = Memory {
             id,
             kind: input.kind,
@@ -129,7 +169,7 @@ impl MemoryEngine {
             updated_at: now,
             salience: 0.0,
             sensitivity: input.sensitivity,
-            sync_state: SyncState::LocalOnly,
+            sync_state,
             version: 1,
             parent_id: input.parent_id,
         };
@@ -138,11 +178,60 @@ impl MemoryEngine {
             .flush()
             .map_err(|e| anyhow!("flush failed: {e}"))?;
         // Establish semantic relationships (skip chunks: they connect via
-        // part_of and there are too many to link pairwise).
-        if memory.kind != MemoryKind::DocChunk {
+        // part_of; skip entities: they are hubs connected via mentions).
+        if memory.kind != MemoryKind::DocChunk && memory.kind != MemoryKind::Entity {
             self.link_related(&memory);
         }
         Ok(memory)
+    }
+
+    // ---- entities --------------------------------------------------------
+
+    /// Find an existing entity node by name, or create one. Deduped by name.
+    fn find_or_create_entity(&self, name: &str) -> Result<String> {
+        let key = name.trim().to_lowercase();
+        if key.is_empty() {
+            return Err(anyhow!("empty entity name"));
+        }
+        if let Ok(idx) = self.entity_index.lock() {
+            if let Some(id) = idx.get(&key) {
+                return Ok(id.clone());
+            }
+        }
+        let entity = self.add(NewMemory {
+            kind: MemoryKind::Entity,
+            title: name.trim().to_string(),
+            text: name.trim().to_string(),
+            site_id: String::new(),
+            asset_id: String::new(),
+            geo: None,
+            tags: vec!["entity".to_string()],
+            source: MemorySource::Manual,
+            sensitivity: Sensitivity::Shareable,
+            parent_id: None,
+        })?;
+        if let Ok(mut idx) = self.entity_index.lock() {
+            idx.insert(key, entity.id.clone());
+        }
+        Ok(entity.id)
+    }
+
+    /// Extract entities from `text` and link `from_id` to them via "mentions".
+    /// Returns the entity ids linked.
+    pub fn attach_entities(&self, from_id: &str, text: &str, model: &str) -> Result<Vec<String>> {
+        let names = entities::extract(&self.ollama, model, text)?;
+        let mut ids = Vec::new();
+        for name in names {
+            if let Ok(id) = self.find_or_create_entity(&name) {
+                if id != from_id {
+                    ids.push(id);
+                }
+            }
+        }
+        if let Ok(mut g) = self.graph.lock() {
+            let _ = g.set_mentions(from_id, &ids);
+        }
+        Ok(ids)
     }
 
     /// Find this memory's nearest neighbours and record "related" edges.
@@ -226,8 +315,14 @@ impl MemoryEngine {
     // ---- documents (Vault) ----------------------------------------------
 
     /// Parse + chunk + store a document as a Document node with chunk children.
+    /// `entity_model` (when non-empty) is used to link the document to entities.
     /// Returns the document node and the number of chunks stored.
-    pub fn ingest_document(&self, filename: &str, bytes: &[u8]) -> Result<(Memory, usize)> {
+    pub fn ingest_document(
+        &self,
+        filename: &str,
+        bytes: &[u8],
+        entity_model: &str,
+    ) -> Result<(Memory, usize)> {
         let text = documents::parse(filename, bytes)?;
         if text.trim().is_empty() {
             return Err(anyhow!("no extractable text in '{filename}'"));
@@ -264,6 +359,10 @@ impl MemoryEngine {
             if let Ok(mut g) = self.graph.lock() {
                 let _ = g.add_part_of(&stored.id, &doc.id);
             }
+        }
+        // Link the document to the entities it mentions (best-effort).
+        if !entity_model.is_empty() {
+            let _ = self.attach_entities(&doc.id, &text, entity_model);
         }
         Ok((doc, n))
     }

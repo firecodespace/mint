@@ -14,6 +14,8 @@ pub enum MemoryKind {
     Event,
     /// Root node of an ingested document (its chunks link to it via parent_id).
     Document,
+    /// A named entity (person/org/place/concept) that connects memories.
+    Entity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

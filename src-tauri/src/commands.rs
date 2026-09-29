@@ -101,12 +101,15 @@ pub async fn ingest_document(
     data_base64: String,
 ) -> Result<DocIngestResult, String> {
     let engine = state.engine.clone();
+    let fast_model = state.fast_model.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(data_base64.as_bytes())
             .map_err(|e| format!("invalid file data: {e}"))?;
         let eng = engine.lock().map_err(|_| "engine poisoned".to_string())?;
-        let (doc, chunks) = eng.ingest_document(&name, &bytes).map_err(|e| e.to_string())?;
+        let (doc, chunks) = eng
+            .ingest_document(&name, &bytes, &fast_model)
+            .map_err(|e| e.to_string())?;
         Ok(DocIngestResult {
             id: doc.id,
             title: doc.title,
@@ -312,6 +315,11 @@ fn run_turn(
         .map(|r| r.results)
         .unwrap_or_default()
     };
+    // Entity hub nodes are bare names; keep them out of the chat grounding.
+    let results: Vec<_> = results
+        .into_iter()
+        .filter(|r| r.memory.kind != MemoryKind::Entity)
+        .collect();
     let retrieved: Vec<RetrievedItem> = results
         .iter()
         .map(|r| RetrievedItem {
@@ -363,6 +371,8 @@ fn run_turn(
         for nm in extracted {
             // add_if_novel skips near-duplicates so restated facts don't pile up.
             if let Ok(Some(m)) = eng.add_if_novel(nm, DEDUP_THRESHOLD) {
+                // Link the new memory to the entities it mentions.
+                let _ = eng.attach_entities(&m.id, &m.text, &fast_model);
                 let item = CapturedItem {
                     id: m.id.clone(),
                     title: m.title.clone(),

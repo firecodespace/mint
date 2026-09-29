@@ -74,6 +74,22 @@ impl GraphStore {
         self.save()
     }
 
+    /// Replace the "mentions" edges from `from` with edges to the given entities.
+    pub fn set_mentions(&mut self, from: &str, entity_ids: &[String]) -> Result<()> {
+        self.edges
+            .retain(|e| !(e.relation == "mentions" && e.from == from));
+        for to in entity_ids {
+            if to != from {
+                self.edges.push(GraphEdge {
+                    from: from.to_string(),
+                    to: to.clone(),
+                    relation: "mentions".into(),
+                });
+            }
+        }
+        self.save()
+    }
+
     pub fn add_part_of(&mut self, chunk: &str, document: &str) -> Result<()> {
         self.edges.push(GraphEdge {
             from: chunk.to_string(),

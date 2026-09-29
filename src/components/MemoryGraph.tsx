@@ -24,13 +24,21 @@ const H = 640;
 const REPULSE = 4200;
 const SPRING = 0.03;
 const LINK_PART = 55; // chunk -> document (tight cluster)
+const LINK_MENTION = 85; // memory -> entity hub
 const LINK_REL = 120; // related memories (looser)
 const CENTER = 0.006;
 const DAMP = 0.86;
 
+function linkLength(relation: string) {
+  if (relation === "part_of") return LINK_PART;
+  if (relation === "mentions") return LINK_MENTION;
+  return LINK_REL;
+}
+
 function radius(n: Node, selected: boolean) {
-  if (selected) return n.kind === "document" ? 11 : 9;
+  if (selected) return n.kind === "document" || n.kind === "entity" ? 11 : 9;
   if (n.kind === "document") return 9;
+  if (n.kind === "entity") return 8;
   if (n.isChunk) return 3.5;
   return 6;
 }
@@ -40,7 +48,9 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
   const [, setTick] = useState(0);
   const [runId, setRunId] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
+  const [view, setView] = useState({ x: 0, y: 0, w: W, h: H });
   const dragId = useRef<string | null>(null);
+  const pan = useRef<{ x: number; y: number } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
   useEffect(() => {
@@ -99,7 +109,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
         const a = byId.get(e.a);
         const b = byId.get(e.b);
         if (!a || !b) continue;
-        const target = e.relation === "part_of" ? LINK_PART : LINK_REL;
+        const target = linkLength(e.relation);
         const dx = b.x - a.x;
         const dy = b.y - a.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -145,15 +155,64 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
     return { x: p.x, y: p.y };
   }
 
+  // Scroll to zoom, anchored on the cursor (native non-passive listener so we
+  // can preventDefault the page scroll).
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const p = toSvg(e.clientX, e.clientY);
+      setView((v) => {
+        const factor = e.deltaY > 0 ? 1.1 : 1 / 1.1;
+        const minW = W * 0.15;
+        const maxW = W * 3.5;
+        const newW = Math.max(minW, Math.min(maxW, v.w * factor));
+        const scale = newW / v.w;
+        return {
+          x: p.x - (p.x - v.x) * scale,
+          y: p.y - (p.y - v.y) * scale,
+          w: newW,
+          h: v.h * scale,
+        };
+      });
+    };
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+    // Re-run once `data` loads: the <svg> does not exist on the first mount
+    // (a placeholder renders until graph data arrives), so the listener must
+    // attach after the svg element appears.
+  }, [data]);
+
   function onMove(e: React.MouseEvent) {
-    if (!dragId.current) return;
-    const { x, y } = toSvg(e.clientX, e.clientY);
-    const n = nodesRef.current.find((n) => n.id === dragId.current);
-    if (n) {
-      n.x = x;
-      n.y = y;
-      n.pinned = true;
+    if (dragId.current) {
+      const { x, y } = toSvg(e.clientX, e.clientY);
+      const n = nodesRef.current.find((n) => n.id === dragId.current);
+      if (n) {
+        n.x = x;
+        n.y = y;
+        n.pinned = true;
+      }
+      return;
     }
+    if (pan.current) {
+      const a = toSvg(pan.current.x, pan.current.y);
+      const b = toSvg(e.clientX, e.clientY);
+      setView((v) => ({ ...v, x: v.x - (b.x - a.x), y: v.y - (b.y - a.y) }));
+      pan.current = { x: e.clientX, y: e.clientY };
+    }
+  }
+
+  function onBackgroundDown(e: React.MouseEvent) {
+    // Pan only when the empty background is grabbed, not a node.
+    if (e.target === svgRef.current) {
+      pan.current = { x: e.clientX, y: e.clientY };
+    }
+  }
+
+  function endInteract() {
+    dragId.current = null;
+    pan.current = null;
   }
 
   const ns = nodesRef.current;
@@ -177,11 +236,13 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
       <svg
         ref={svgRef}
         className="graph-svg"
-        viewBox={`0 0 ${W} ${H}`}
+        viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
         preserveAspectRatio="xMidYMid meet"
+        onMouseDown={onBackgroundDown}
         onMouseMove={onMove}
-        onMouseUp={() => (dragId.current = null)}
-        onMouseLeave={() => (dragId.current = null)}
+        onMouseUp={endInteract}
+        onMouseLeave={endInteract}
+        onDoubleClick={() => setView({ x: 0, y: 0, w: W, h: H })}
       >
         {edges.map((e, i) => {
           const a = byId.get(e.a);
@@ -222,10 +283,13 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
 
       <div className="graph-legend">
         <span><i className="lg document" /> document</span>
+        <span><i className="lg entity" /> entity</span>
         <span><i className="lg note" /> memory</span>
         <span><i className="lg chunk" /> chunk</span>
         <span><i className="lg e-part" /> part of</span>
+        <span><i className="lg e-mention" /> mentions</span>
         <span><i className="lg e-rel" /> related</span>
+        <span className="lg-hint">scroll to zoom · drag background to pan · double-click to reset</span>
       </div>
 
       {sel && (

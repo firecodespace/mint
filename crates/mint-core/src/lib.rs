@@ -8,9 +8,11 @@ pub mod conversations;
 pub mod documents;
 pub mod embed;
 pub mod engine;
+pub mod entities;
 pub mod graph;
 pub mod ollama;
 pub mod record;
+pub mod sync;
 
 pub use conversations::ConversationStore;
 pub use engine::MemoryEngine;

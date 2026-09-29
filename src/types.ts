@@ -7,7 +7,8 @@ export type MemoryKind =
   | "doc_chunk"
   | "measurement"
   | "event"
-  | "document";
+  | "document"
+  | "entity";
 
 export type MemorySource = "manual" | "file" | "sensor";
 

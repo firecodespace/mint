@@ -958,13 +958,30 @@ ul {
   fill: #6ee7b7;
   opacity: 0.75;
 }
+.graph-node.entity circle {
+  fill: #fbbf24;
+  stroke: #0b1014;
+  stroke-width: 2;
+}
+.graph-node.entity text {
+  fill: #fcd34d;
+  font-weight: 600;
+}
 .pill.document {
   color: #f0abfc;
   border-color: rgba(240, 171, 252, 0.4);
 }
+.pill.entity {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.4);
+}
 .graph-edge.part_of {
   stroke: rgba(240, 171, 252, 0.45);
   stroke-width: 1.2;
+}
+.graph-edge.mentions {
+  stroke: rgba(251, 191, 36, 0.4);
+  stroke-width: 1.1;
 }
 .graph-edge.related {
   stroke: var(--line);
@@ -998,6 +1015,9 @@ ul {
 .lg.document {
   background: #f0abfc;
 }
+.lg.entity {
+  background: #fbbf24;
+}
 .lg.note {
   background: #c4b5fd;
 }
@@ -1010,11 +1030,22 @@ ul {
   border-radius: 0;
   border-top: 2px solid rgba(240, 171, 252, 0.6);
 }
+.lg.e-mention {
+  width: 14px;
+  height: 0;
+  border-radius: 0;
+  border-top: 2px solid rgba(251, 191, 36, 0.6);
+}
 .lg.e-rel {
   width: 14px;
   height: 0;
   border-radius: 0;
   border-top: 2px dashed var(--muted);
+}
+.lg-hint {
+  color: var(--muted);
+  opacity: 0.7;
+  font-style: italic;
 }
 
 /* Vault */

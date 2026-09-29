@@ -26,6 +26,17 @@ struct MetaData {
     /// topic id -> rolling-summary bookkeeping.
     #[serde(default)]
     topics: HashMap<String, TopicState>,
+    /// This device's stable identity (edge <-> cloud provenance).
+    #[serde(default)]
+    device_id: String,
+    /// memory id -> updated_at at the last successful sync (the 3-way merge
+    /// base: tells "only one side changed" apart from a real conflict).
+    #[serde(default)]
+    synced: HashMap<String, String>,
+    /// memory id -> user's explicit sync choice (true = may sync, false = keep
+    /// on this device). Overrides the automatic policy.
+    #[serde(default)]
+    policy_overrides: HashMap<String, bool>,
 }
 
 /// Bookkeeping for a topic's rolling summary and naming.
@@ -149,6 +160,36 @@ impl MetaStore {
     }
     pub fn remove_topic(&mut self, id: &str) -> Result<()> {
         self.data.topics.remove(id);
+        self.save()
+    }
+
+    // ---- device identity ----
+    /// This device's id, created once and persisted.
+    pub fn device_id(&mut self) -> String {
+        if self.data.device_id.is_empty() {
+            self.data.device_id = format!("dev-{}", ulid::Ulid::generate());
+            let _ = self.save();
+        }
+        self.data.device_id.clone()
+    }
+
+    // ---- sync merge base ----
+    pub fn synced_version(&self, id: &str) -> Option<String> {
+        self.data.synced.get(id).cloned()
+    }
+    pub fn set_synced_versions(&mut self, entries: &[(String, String)]) -> Result<()> {
+        for (id, ts) in entries {
+            self.data.synced.insert(id.clone(), ts.clone());
+        }
+        self.save()
+    }
+
+    // ---- user policy overrides ----
+    pub fn policy_override(&self, id: &str) -> Option<bool> {
+        self.data.policy_overrides.get(id).copied()
+    }
+    pub fn set_policy_override(&mut self, id: &str, share: bool) -> Result<()> {
+        self.data.policy_overrides.insert(id.to_string(), share);
         self.save()
     }
 }

@@ -26,6 +26,10 @@ pub struct GraphNode {
     /// Topic the node is filed under (chunks inherit their document's topic).
     pub topic_id: Option<String>,
     pub salience: f32,
+    /// Replaced by a newer version (version chain).
+    pub superseded: bool,
+    /// Kept on this device by the sync policy.
+    pub local_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,6 +141,24 @@ impl GraphStore {
                 relation: "part_of".into(),
             });
         }
+        self.save()
+    }
+
+    /// Add one edge unless an identical edge already exists.
+    pub fn add_edge(&mut self, from: &str, to: &str, relation: &str) -> Result<()> {
+        if from == to
+            || self
+                .edges
+                .iter()
+                .any(|e| e.from == from && e.to == to && e.relation == relation)
+        {
+            return Ok(());
+        }
+        self.edges.push(GraphEdge {
+            from: from.to_string(),
+            to: to.to_string(),
+            relation: relation.to_string(),
+        });
         self.save()
     }
 

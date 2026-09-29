@@ -325,6 +325,78 @@ pub fn long_doc(paragraphs: usize) -> String {
     text
 }
 
+/// Sync-policy case: should this text stay on the device, and why.
+pub struct PolicyCase {
+    pub text: &'static str,
+    /// Expected category when it must stay local; None = may sync.
+    pub local: Option<&'static str>,
+}
+
+pub const POLICY_CASES: &[PolicyCase] = &[
+    PolicyCase { text: "my wifi password is hunter2", local: Some("secret") },
+    PolicyCase { text: "OpenAI key sk-proj-A1b2C3d4E5f6G7h8I9j0", local: Some("secret") },
+    PolicyCase { text: "aws access key AKIAIOSFODNN7EXAMPLE", local: Some("secret") },
+    PolicyCase { text: "the building door pin is 4821", local: Some("secret") },
+    PolicyCase { text: "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123signature", local: Some("secret") },
+    PolicyCase { text: "card 4111 1111 1111 1111 exp 09/28", local: Some("financial") },
+    PolicyCase { text: "salary goes to account number 004512349876", local: Some("financial") },
+    PolicyCase { text: "IBAN DE89370400440532013000 for the rent", local: Some("financial") },
+    PolicyCase { text: "my SSN is 123-45-6789", local: Some("government_id") },
+    PolicyCase { text: "aadhaar 1234 5678 9012 for KYC", local: Some("government_id") },
+    PolicyCase { text: "PAN ABCDE1234F", local: Some("government_id") },
+    PolicyCase { text: "passport number K1234567 expires 2031", local: Some("government_id") },
+    PolicyCase { text: "I'm allergic to peanuts", local: Some("health") },
+    PolicyCase { text: "I was diagnosed with asthma last year", local: Some("health") },
+    PolicyCase { text: "my therapist moved our session to Thursday", local: Some("health") },
+    PolicyCase { text: "I take 50mg of medication every morning", local: Some("health") },
+    PolicyCase { text: "email me at yash@example.com", local: Some("contact") },
+    PolicyCase { text: "call the landlord at +91 98765 43210", local: Some("contact") },
+    PolicyCase { text: "my address is 12 MG Road, Pune", local: Some("contact") },
+    PolicyCase { text: "reset my password tomorrow", local: None },
+    PolicyCase { text: "the password is required for the admin panel", local: None },
+    PolicyCase { text: "Cancer detection with CNNs reaches 0.94 AUC on the benchmark", local: None },
+    PolicyCase { text: "The patient cohort in the study showed fewer symptoms", local: None },
+    PolicyCase { text: "commit 9fceb02d0ae598e95dc970b74767f19372d61af8 fixed the parser", local: None },
+    PolicyCase { text: "Meeting at 10:30 on 2026-10-02 in room 204", local: None },
+    PolicyCase { text: "see https://example.com/docs/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", local: None },
+    PolicyCase { text: "version 2026.10.02 shipped to 1200 users", local: None },
+    PolicyCase { text: "CoreSum inference takes 15 to 47 seconds per video", local: None },
+    PolicyCase { text: "Our team switched from Postgres to SQLite for the edge build", local: None },
+    PolicyCase { text: "I decided to use Rust for the backend", local: None },
+    PolicyCase { text: "My exam is on Friday", local: None },
+    PolicyCase { text: "Bought a Yamaha P-45 keyboard for 45000 rupees", local: None },
+    PolicyCase { text: "Order 1234567 shipped yesterday", local: None },
+    PolicyCase { text: "The API key rotation policy is every 90 days", local: None },
+];
+
+/// Version-chain case: earlier memories, then a new one; which earlier memory
+/// (if any) the new one updates, and optionally a question whose answer must
+/// come from the CURRENT version.
+pub struct VersionCase {
+    pub id: &'static str,
+    pub old: &'static [&'static str],
+    pub new: &'static str,
+    pub updates: Option<usize>,
+    pub query: Option<&'static str>,
+}
+
+pub const VERSION_CASES: &[VersionCase] = &[
+    VersionCase { id: "v01", old: &["My exam is on Friday"], new: "My exam got moved to Monday", updates: Some(0), query: Some("when is my exam?") },
+    VersionCase { id: "v02", old: &["I prefer dark roast coffee"], new: "I switched to green tea and stopped drinking coffee", updates: Some(0), query: Some("what do I like to drink?") },
+    VersionCase { id: "v03", old: &["CoreSum TCS is 0.585 on the benchmark"], new: "CoreSum TCS improved to 0.71 after tuning the grid budget", updates: Some(0), query: Some("what is the CoreSum TCS?") },
+    VersionCase { id: "v04", old: &["Our edge build uses Postgres for storage"], new: "We moved the edge build from Postgres to SQLite", updates: Some(0), query: Some("which database does the edge build use?") },
+    VersionCase { id: "v05", old: &["The DSO meeting is on Tuesday at 3pm"], new: "The DSO meeting was rescheduled to Thursday at 11am", updates: Some(0), query: Some("when is the DSO meeting?") },
+    VersionCase { id: "v06", old: &["I live in Pune"], new: "I moved to Bangalore last month", updates: Some(0), query: Some("which city do I live in?") },
+    VersionCase { id: "v07", old: &["The CoreSum report deadline is October 2"], new: "The CoreSum report deadline is now October 9", updates: Some(0), query: Some("when is the CoreSum report due?") },
+    VersionCase { id: "v08", old: &["My exam is on Friday"], new: "My brother's exam is on Monday", updates: None, query: None },
+    VersionCase { id: "v09", old: &["I prefer dark roast coffee"], new: "I bought a new burr grinder for coffee", updates: None, query: None },
+    VersionCase { id: "v10", old: &["CoreSum TCS is 0.585 on the benchmark"], new: "CoreSum inference takes 15 seconds per video", updates: None, query: None },
+    VersionCase { id: "v11", old: &["Practicing piano scales every day"], new: "Bought a Yamaha P-45 keyboard", updates: None, query: None },
+    VersionCase { id: "v12", old: &["Running 5k three times a week"], new: "Deadlift is up to 100 kg now", updates: None, query: None },
+    VersionCase { id: "v13", old: &["I want to learn piano by the end of the year"], new: "My goal is still to learn piano by the end of the year", updates: None, query: None },
+    VersionCase { id: "v14", old: &["My exam is on Friday", "My brother's exam is on Monday"], new: "My exam was moved to Wednesday", updates: Some(0), query: Some("when is my exam?") },
+];
+
 pub const CAPTURE_CASES: &[CaptureCase] = &[
     // Durable statements: should be captured.
     CaptureCase { text: "My name is Yash", capture: true },

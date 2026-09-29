@@ -79,6 +79,10 @@ fn main() -> Result<()> {
         let tuning = format!("{:?}", eng.tuning());
         let mut r = run(&eng, &label, &llm, scale)?;
         r["tuning"] = json!(tuning);
+        r["policy"] = eval_policy();
+        // --judge picks the version-chain judge model (defaults to --llm).
+        let judge = arg(&args, "--judge").unwrap_or_else(|| llm.clone());
+        r["versions"] = eval_versions(&models, &judge)?;
         r
     };
     let _ = std::fs::remove_dir_all(&dir);
@@ -452,6 +456,134 @@ fn run(eng: &MemoryEngine, label: &str, llm: &str, scale: usize) -> Result<Value
     }))
 }
 
+/// Sync policy: labeled sensitive/benign texts, plus a false-positive sweep of
+/// the whole (benign) research corpus, which must be allowed to sync.
+fn eval_policy() -> Value {
+    let (mut tp, mut fp, mut fneg, mut tn, mut cat_ok) = (0, 0, 0, 0, 0);
+    let mut failures: Vec<Value> = Vec::new();
+    for c in corpus::POLICY_CASES {
+        let got = mint_core::policy::scan(c.text);
+        match (c.local, &got) {
+            (Some(want), Some(f)) => {
+                tp += 1;
+                if f.category == want {
+                    cat_ok += 1;
+                } else {
+                    failures.push(json!({ "text": c.text, "want": want, "got": f.category }));
+                }
+            }
+            (Some(want), None) => {
+                fneg += 1;
+                failures.push(json!({ "text": c.text, "want": want, "got": "sync" }));
+            }
+            (None, Some(f)) => {
+                fp += 1;
+                failures.push(json!({ "text": c.text, "want": "sync", "got": f.category }));
+            }
+            (None, None) => tn += 1,
+        }
+    }
+    let mut corpus_items = 0;
+    let mut corpus_flagged: Vec<String> = Vec::new();
+    for d in corpus::DOCS {
+        for (i, ch) in mint_core::documents::chunk_text(d.text).iter().enumerate() {
+            corpus_items += 1;
+            if let Some(f) = mint_core::policy::scan(ch) {
+                corpus_flagged.push(format!("{} [{}]: {}", d.key, i + 1, f.reason));
+            }
+        }
+    }
+    for n in corpus::NOTES {
+        corpus_items += 1;
+        if let Some(f) = mint_core::policy::scan(n.text) {
+            corpus_flagged.push(format!("{}: {}", n.key, f.reason));
+        }
+    }
+    let precision = ratio(tp, tp + fp);
+    let recall = ratio(tp, tp + fneg);
+    json!({
+        "cases": corpus::POLICY_CASES.len(),
+        "precision": precision, "recall": recall, "f1": f1(precision, recall),
+        "accuracy": ratio(tp + tn, corpus::POLICY_CASES.len()),
+        "category_accuracy": ratio(cat_ok, tp.max(1)),
+        "corpus_items": corpus_items,
+        "corpus_false_positive_rate": ratio(corpus_flagged.len(), corpus_items),
+        "corpus_flagged": corpus_flagged,
+        "failures": failures,
+    })
+}
+
+/// Version chains: does a new memory correctly supersede the right older one
+/// (and only when it truly updates it), and does retrieval then answer from
+/// the CURRENT version with the outdated one hidden?
+fn eval_versions(models: &std::path::Path, llm: &str) -> Result<Value> {
+    let (mut tp, mut fp, mut fneg, mut tn, mut target_ok) = (0, 0, 0, 0, 0);
+    let (mut q_total, mut q_current, mut q_hidden) = (0, 0, 0);
+    let mut failures: Vec<Value> = Vec::new();
+    let t = Instant::now();
+    for c in corpus::VERSION_CASES {
+        let dir = std::env::temp_dir().join(format!("mint-bench-{}-{}", std::process::id(), c.id));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        {
+            let e = MemoryEngine::open_with_models(&dir, models)?;
+            let mut old_ids = Vec::new();
+            for o in c.old {
+                old_ids.push(e.add(new_mem(MemoryKind::Note, o, o, None))?.id);
+                std::thread::sleep(std::time::Duration::from_millis(3));
+            }
+            let n = e.add(new_mem(MemoryKind::Note, c.new, c.new, None))?;
+            let linked = e.link_versions(&n.id, llm)?;
+            let expected = c.updates.map(|i| old_ids[i].clone());
+            match (&expected, &linked) {
+                (Some(want), Some(got)) => {
+                    tp += 1;
+                    if want == got {
+                        target_ok += 1;
+                    } else {
+                        failures.push(json!({ "case": c.id, "problem": "wrong target" }));
+                    }
+                }
+                (Some(_), None) => {
+                    fneg += 1;
+                    failures.push(json!({ "case": c.id, "problem": "missed update" }));
+                }
+                (None, Some(_)) => {
+                    fp += 1;
+                    failures.push(json!({ "case": c.id, "problem": "false update" }));
+                }
+                (None, None) => tn += 1,
+            }
+            if let (Some(q), Some(old)) = (c.query, &expected) {
+                q_total += 1;
+                let r = e.retrieve(q, 3)?;
+                if r.first().map(|x| x.memory.id == n.id).unwrap_or(false) {
+                    q_current += 1;
+                } else {
+                    failures.push(json!({ "case": c.id, "problem": "current version not top-1" }));
+                }
+                if !r.iter().any(|x| &x.memory.id == old) {
+                    q_hidden += 1;
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let precision = ratio(tp, tp + fp);
+    let recall = ratio(tp, tp + fneg);
+    Ok(json!({
+        "cases": corpus::VERSION_CASES.len(),
+        "judge": if llm.is_empty() { "rules" } else { llm },
+        "precision": precision, "recall": recall, "f1": f1(precision, recall),
+        "accuracy": ratio(tp + tn, corpus::VERSION_CASES.len()),
+        "target_accuracy": ratio(target_ok, tp.max(1)),
+        "current_top1": ratio(q_current, q_total),
+        "outdated_hidden": ratio(q_hidden, q_total),
+        "ms": t.elapsed().as_secs_f64() * 1000.0,
+        "failures": failures,
+    }))
+}
+
 fn run_pipeline(eng: &MemoryEngine, pipe: &str, q: &str) -> Result<Vec<SearchResult>> {
     let mut r = match pipe {
         "search" => {
@@ -642,6 +774,33 @@ fn print_report(r: &Value) {
                 name, f(&m["recall"]), f(&m["mrr"]), f(&m["ndcg"]), f(&m["hit1"]),
                 f(&m["precision"]), f(&m["p50_ms"]), f(&m["p95_ms"])
             );
+        }
+    }
+    let p = &r["policy"];
+    if p.is_object() {
+        println!(
+            "\nsync policy ({} cases): precision {:.3} recall {:.3} accuracy {:.3}, category {:.3}; \
+corpus false-positive rate {:.3} ({} items)",
+            p["cases"], f(&p["precision"]), f(&p["recall"]), f(&p["accuracy"]),
+            f(&p["category_accuracy"]), f(&p["corpus_false_positive_rate"]), p["corpus_items"]
+        );
+        for x in p["failures"].as_array().into_iter().flatten() {
+            println!("   x {} (want {}, got {})", x["text"], x["want"], x["got"]);
+        }
+        for x in p["corpus_flagged"].as_array().into_iter().flatten() {
+            println!("   corpus flagged: {x}");
+        }
+    }
+    let v = &r["versions"];
+    if v.is_object() {
+        println!(
+            "version chains ({} cases, judge {}): precision {:.3} recall {:.3} accuracy {:.3}, \
+right target {:.3}; current version top-1 {:.3}, outdated hidden {:.3} ({:.0} ms)",
+            v["cases"], v["judge"], f(&v["precision"]), f(&v["recall"]), f(&v["accuracy"]),
+            f(&v["target_accuracy"]), f(&v["current_top1"]), f(&v["outdated_hidden"]), f(&v["ms"])
+        );
+        for x in v["failures"].as_array().into_iter().flatten() {
+            println!("   x {} {}", x["case"], x["problem"]);
         }
     }
     println!("\nper-query (retrieve pipeline, misses flagged):");

@@ -64,20 +64,28 @@ fn words(text: &str) -> Vec<String> {
 
 /// Runs of digits allowing common separators (space, dash, dot, parens, +),
 /// returned as (digits only, raw run). Used for card / ID / phone detection.
+/// Runs glued to letters ("Yz0123456789", "v2", "abc123") are part of an
+/// identifier, not a number, and are skipped.
 fn digit_runs(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut raw = String::new();
     let mut digits = String::new();
-    let flush = |raw: &mut String, digits: &mut String, out: &mut Vec<(String, String)>| {
-        if !digits.is_empty() {
+    let mut glued = false;
+    let chars: Vec<char> = text.chars().collect();
+    let mut flush = |raw: &mut String, digits: &mut String, glued: &mut bool, next: Option<char>| {
+        let glued_after = next.map(|c| c.is_alphabetic()).unwrap_or(false);
+        if !digits.is_empty() && !*glued && !glued_after {
             out.push((digits.clone(), raw.trim().to_string()));
         }
         raw.clear();
         digits.clear();
+        *glued = false;
     };
-    let chars: Vec<char> = text.chars().collect();
     for (i, &c) in chars.iter().enumerate() {
         if c.is_ascii_digit() {
+            if digits.is_empty() && raw.is_empty() {
+                glued = i > 0 && chars[i - 1].is_alphabetic();
+            }
             raw.push(c);
             digits.push(c);
         } else if !digits.is_empty()
@@ -85,15 +93,13 @@ fn digit_runs(text: &str) -> Vec<(String, String)> {
             && chars.get(i + 1).map(|n| n.is_ascii_digit() || *n == '(' || *n == ' ').unwrap_or(false)
         {
             raw.push(c);
-        } else if c == '+' && digits.is_empty() {
-            raw.push(c);
-        } else if c == '(' && digits.is_empty() {
+        } else if (c == '+' || c == '(') && digits.is_empty() {
             raw.push(c);
         } else {
-            flush(&mut raw, &mut digits, &mut out);
+            flush(&mut raw, &mut digits, &mut glued, Some(c));
         }
     }
-    flush(&mut raw, &mut digits, &mut out);
+    flush(&mut raw, &mut digits, &mut glued, None);
     out
 }
 
@@ -399,6 +405,7 @@ mod tests {
             "The patient cohort in the study showed fewer symptoms",
             "Practicing piano scales for 20 minutes every day",
             "version 2026.10.02 shipped",
+            "build id abc1234567890 passed",
         ] {
             assert_eq!(scan(s), None, "should sync: {s}");
         }

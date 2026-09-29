@@ -2,19 +2,33 @@
 //! Uses ureq (already in tree). The cloud is optional: everything works offline,
 //! and sync only runs when a server is reachable and the user is "online".
 
+use std::collections::BTreeMap;
 use std::io::Read;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-/// Server collection that mirrors the local shard.
+/// Default server collection that mirrors the local shard.
 pub const COLLECTION: &str = "mint_memories";
+
+/// Timeout for sync transfers (push/pull/scroll).
+const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
+/// Timeout for latency-sensitive calls (reachability, cloud search in chat).
+const FAST_TIMEOUT: Duration = Duration::from_millis(1500);
+
+fn default_collection() -> String {
+    COLLECTION.to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
     pub url: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Server collection (tests use throwaway ones; the app uses the default).
+    #[serde(default = "default_collection")]
+    pub collection: String,
 }
 
 impl Default for SyncConfig {
@@ -22,6 +36,7 @@ impl Default for SyncConfig {
         Self {
             url: "http://localhost:6333".to_string(),
             api_key: None,
+            collection: default_collection(),
         }
     }
 }
@@ -45,20 +60,60 @@ pub struct TombstonePoint {
     pub deleted_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SyncReport {
     pub pushed: usize,
     pub pulled: usize,
+    /// Edits made on BOTH sides since the last sync (the losing edit is kept
+    /// as an older version, never dropped).
     pub conflicts: usize,
+    /// Memories the policy kept on this device (not pushed).
+    #[serde(default)]
+    pub withheld: usize,
+    /// Why they were kept local (category -> count).
+    #[serde(default)]
+    pub withheld_by: BTreeMap<String, usize>,
+    /// Cloud copies removed because the memory is now private.
+    #[serde(default)]
+    pub retracted: usize,
+    /// Other devices' raw memories left in the cloud (tiered pull); still
+    /// reachable through cloud search when online.
+    #[serde(default)]
+    pub cloud_only: usize,
 }
 
 pub struct SyncClient {
     cfg: SyncConfig,
+    agent: ureq::Agent,
+    fast: ureq::Agent,
+}
+
+fn agent_with_timeout(t: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(t))
+        .build()
+        .into()
 }
 
 impl SyncClient {
     pub fn new(cfg: SyncConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            agent: agent_with_timeout(SYNC_TIMEOUT),
+            fast: agent_with_timeout(FAST_TIMEOUT),
+        }
+    }
+
+    fn collection(&self) -> &str {
+        &self.cfg.collection
+    }
+
+    fn tombstones(&self) -> String {
+        if self.cfg.collection == COLLECTION {
+            TOMBSTONES.to_string()
+        } else {
+            format!("{}_tombstones", self.cfg.collection)
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -66,7 +121,11 @@ impl SyncClient {
     }
 
     fn get(&self, path: &str) -> Result<String> {
-        let mut req = ureq::get(self.url(path));
+        self.get_with(&self.agent, path)
+    }
+
+    fn get_with(&self, agent: &ureq::Agent, path: &str) -> Result<String> {
+        let mut req = agent.get(self.url(path));
         if let Some(k) = &self.cfg.api_key {
             req = req.header("api-key", k);
         }
@@ -77,10 +136,20 @@ impl SyncClient {
     }
 
     fn send_json(&self, method: &str, path: &str, body: &serde_json::Value) -> Result<String> {
+        self.send_json_with(&self.agent, method, path, body)
+    }
+
+    fn send_json_with(
+        &self,
+        agent: &ureq::Agent,
+        method: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String> {
         let url = self.url(path);
         let builder = match method {
-            "PUT" => ureq::put(url),
-            "POST" => ureq::post(url),
+            "PUT" => agent.put(url),
+            "POST" => agent.post(url),
             other => return Err(anyhow!("unsupported method {other}")),
         };
         let mut builder = builder.header("Content-Type", "application/json");
@@ -96,21 +165,71 @@ impl SyncClient {
         Ok(out)
     }
 
-    /// Is the server reachable?
+    /// Is the server reachable? (short timeout)
     pub fn reachable(&self) -> bool {
-        self.get("/").is_ok()
+        self.get_with(&self.fast, "/").is_ok()
+    }
+
+    /// Cloud search: hybrid (dense + sparse, RRF) query against the server,
+    /// short timeout so chat never stalls on the network. Returns
+    /// (payload, score) pairs.
+    pub fn query(
+        &self,
+        dense: &[f32],
+        sparse_indices: &[u32],
+        sparse_values: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(serde_json::Value, f32)>> {
+        let body = serde_json::json!({
+            "prefetch": [
+                { "query": dense, "using": "dense", "limit": 30 },
+                { "query": { "indices": sparse_indices, "values": sparse_values },
+                  "using": "sparse", "limit": 30 }
+            ],
+            "query": { "fusion": "rrf" },
+            "limit": limit,
+            "with_payload": true
+        });
+        let raw = self.send_json_with(
+            &self.fast,
+            "POST",
+            &format!("/collections/{}/points/query", self.collection()),
+            &body,
+        )?;
+        let v: serde_json::Value = serde_json::from_str(&raw)?;
+        let points = v["result"]["points"]
+            .as_array()
+            .or_else(|| v["result"].as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(points
+            .into_iter()
+            .map(|p| (p["payload"].clone(), p["score"].as_f64().unwrap_or(0.0) as f32))
+            .collect())
+    }
+
+    /// Drop this client's collections (test cleanup only).
+    pub fn delete_collections(&self) -> Result<()> {
+        for c in [self.collection().to_string(), self.tombstones()] {
+            let mut req = self.agent.delete(self.url(&format!("/collections/{c}")));
+            if let Some(k) = &self.cfg.api_key {
+                req = req.header("api-key", k);
+            }
+            let _ = req.call();
+        }
+        Ok(())
     }
 
     /// Create the collection if it does not exist (dense + sparse vectors).
     pub fn ensure_collection(&self, dim: usize) -> Result<()> {
-        if self.get(&format!("/collections/{COLLECTION}")).is_ok() {
+        if self.get(&format!("/collections/{}", self.collection())).is_ok() {
             return Ok(());
         }
         let body = serde_json::json!({
             "vectors": { "dense": { "size": dim, "distance": "Cosine" } },
             "sparse_vectors": { "sparse": {} }
         });
-        self.send_json("PUT", &format!("/collections/{COLLECTION}"), &body)?;
+        self.send_json("PUT", &format!("/collections/{}", self.collection()), &body)?;
         Ok(())
     }
 
@@ -134,18 +253,18 @@ impl SyncClient {
         let body = serde_json::json!({ "points": json_points });
         self.send_json(
             "PUT",
-            &format!("/collections/{COLLECTION}/points?wait=true"),
+            &format!("/collections/{}/points?wait=true", self.collection()),
             &body,
         )?;
         Ok(())
     }
 
     pub fn ensure_tombstone_collection(&self) -> Result<()> {
-        if self.get(&format!("/collections/{TOMBSTONES}")).is_ok() {
+        if self.get(&format!("/collections/{}", self.tombstones())).is_ok() {
             return Ok(());
         }
         let body = serde_json::json!({ "vectors": { "t": { "size": 1, "distance": "Dot" } } });
-        self.send_json("PUT", &format!("/collections/{TOMBSTONES}"), &body)?;
+        self.send_json("PUT", &format!("/collections/{}", self.tombstones()), &body)?;
         Ok(())
     }
 
@@ -165,7 +284,7 @@ impl SyncClient {
             .collect();
         self.send_json(
             "PUT",
-            &format!("/collections/{TOMBSTONES}/points?wait=true"),
+            &format!("/collections/{}/points?wait=true", self.tombstones()),
             &serde_json::json!({ "points": json_points }),
         )?;
         Ok(())
@@ -182,7 +301,7 @@ impl SyncClient {
             }
             let raw = self.send_json(
                 "POST",
-                &format!("/collections/{TOMBSTONES}/points/scroll"),
+                &format!("/collections/{}/points/scroll", self.tombstones()),
                 &body,
             )?;
             let v: serde_json::Value = serde_json::from_str(&raw)?;
@@ -211,7 +330,7 @@ impl SyncClient {
         }
         self.send_json(
             "POST",
-            &format!("/collections/{COLLECTION}/points/delete?wait=true"),
+            &format!("/collections/{}/points/delete?wait=true", self.collection()),
             &serde_json::json!({ "points": uuid_ids }),
         )?;
         Ok(())
@@ -230,7 +349,7 @@ impl SyncClient {
             }
             let raw = self.send_json(
                 "POST",
-                &format!("/collections/{COLLECTION}/points/scroll"),
+                &format!("/collections/{}/points/scroll", self.collection()),
                 &body,
             )?;
             let v: serde_json::Value = serde_json::from_str(&raw)?;

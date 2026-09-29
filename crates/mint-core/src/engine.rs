@@ -26,7 +26,7 @@ use super::record::{
     SearchResult, Sensitivity, Stats, SyncState,
 };
 use super::sync::{ServerPoint, SyncClient, SyncReport, TombstonePoint};
-use super::{documents, entities};
+use super::{documents, entities, policy};
 
 use serde::Serialize;
 
@@ -105,6 +105,42 @@ impl Default for Tuning {
             per_doc_cap: 3,
         }
     }
+}
+
+/// Whether a memory may leave the device, and why.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncDecision {
+    pub share: bool,
+    /// secret | financial | government_id | health | contact | user | derived
+    /// (local) or knowledge | document | memory | user (shared).
+    pub category: String,
+    pub reason: String,
+}
+
+impl SyncDecision {
+    fn share(category: &str, reason: &str) -> Self {
+        Self { share: true, category: category.into(), reason: reason.into() }
+    }
+    fn local(category: &str, reason: &str) -> Self {
+        Self { share: false, category: category.into(), reason: reason.into() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyItem {
+    pub id: String,
+    pub title: String,
+    pub category: String,
+    pub reason: String,
+}
+
+/// Device-level view of the sync policy.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct PolicySummary {
+    pub shared: usize,
+    pub local: usize,
+    pub local_by_category: HashMap<String, usize>,
+    pub recent_local: Vec<PolicyItem>,
 }
 
 /// A topic as shown to the user (legend / management UI).
@@ -274,17 +310,15 @@ impl MemoryEngine {
     fn add_opts(&self, input: NewMemory, flush: bool) -> Result<Memory> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = ulid::Ulid::generate().to_string();
-        // Local-only memories and entity hubs never sync; everything else is
-        // queued as pending for the next sync.
-        let sync_state = if input.sensitivity == Sensitivity::LocalOnly
-            || input.kind == MemoryKind::Entity
-            || input.kind == MemoryKind::Topic
-        {
-            SyncState::LocalOnly
-        } else {
-            SyncState::Pending
-        };
-        let memory = Memory {
+        // An explicit "local only" at creation is the user's choice and binds
+        // the policy for this memory from now on.
+        if input.sensitivity == Sensitivity::LocalOnly {
+            if let Ok(mut m) = self.meta.lock() {
+                let _ = m.set_policy_override(&id, false);
+            }
+        }
+        let origin = self.device_id();
+        let mut memory = Memory {
             id,
             kind: input.kind,
             title: input.title,
@@ -299,14 +333,21 @@ impl MemoryEngine {
             updated_at: now,
             salience: 0.0,
             sensitivity: input.sensitivity,
-            sync_state,
+            sync_state: SyncState::Pending,
             version: 1,
             parent_id: input.parent_id,
             topic_id: input.topic_id,
             archived: false,
             due_at: input.due_at,
             done: false,
+            sync_reason: String::new(),
+            supersedes: None,
+            superseded_by: None,
+            origin,
         };
+        // The sync policy decides what may leave the device (stamped on the
+        // returned value too, so callers see the decision).
+        self.apply_policy(&mut memory);
         self.upsert(&memory)?;
         if flush {
             self.shard
@@ -428,10 +469,20 @@ impl MemoryEngine {
     }
 
     /// Batched upsert: one batched embedding call and one shard update for all.
+    /// Every write passes through the sync policy (so content edits re-check
+    /// what may leave the device).
     fn upsert_many(&self, mems: &[Memory]) -> Result<()> {
         if mems.is_empty() {
             return Ok(());
         }
+        let mems: Vec<Memory> = mems
+            .iter()
+            .map(|m| {
+                let mut m = m.clone();
+                self.apply_policy(&mut m);
+                m
+            })
+            .collect();
         let texts: Vec<String> = mems.iter().map(|m| m.text.clone()).collect();
         let vectors = self.embedders.embed_documents(&texts)?;
         let mut points: Vec<PointStructPersisted> = Vec::with_capacity(mems.len());
@@ -450,6 +501,253 @@ impl MemoryEngine {
             ))
             .map_err(|e| anyhow!("upsert failed: {e}"))?;
         Ok(())
+    }
+
+    // ---- version chains (evolving / conflicting information) ------------
+
+    /// If memory `new_id` updates an OLDER memory about the same thing (a
+    /// changed date, number, status, decision or preference), chain them: the
+    /// old one is marked superseded, the new one records what it replaced and
+    /// takes the next version number, and an "updates" edge is drawn. Only
+    /// same-kind memories are compared (notes with notes, events with events).
+    /// `model` judges candidates with the local LLM; empty = deterministic
+    /// rules only. Returns the id of the memory that was superseded.
+    pub fn link_versions(&self, new_id: &str, model: &str) -> Result<Option<String>> {
+        let Some(new) = self.get(new_id)? else {
+            return Ok(None);
+        };
+        if !is_versionable(&new.kind) || new.supersedes.is_some() {
+            return Ok(None);
+        }
+        let (dense, _) = self.embedders.embed_query(&new.text)?;
+        // Ensemble: the precise rules decide first; only when they say no does
+        // the LLM judge the closest candidates (up to 2, bounded cost), which
+        // catches revisions that need world knowledge ("I live in Pune" ->
+        // "I moved to Bangalore").
+        let mut judged = 0;
+        for c in self.query_points(&dense, None, Some(kind_filter(new.kind.clone())), 6)? {
+            let old = c.memory;
+            // Older (ULIDs sort by time), current, and plausibly about the same thing.
+            if old.id >= new.id || old.superseded_by.is_some() || c.score < VERSION_MIN_SIM {
+                continue;
+            }
+            let mut updates = heuristic_updates(&old, &new, c.score);
+            if !updates && !model.trim().is_empty() && judged < 2 {
+                judged += 1;
+                updates = self.judge_update(&old, &new, model).unwrap_or(false);
+            }
+            if updates {
+                self.chain_versions(&old, &new)?;
+                return Ok(Some(old.id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Ask the local LLM whether NEW updates OLD.
+    fn judge_update(&self, old: &Memory, new: &Memory, model: &str) -> Result<bool> {
+        let system = "You compare two memories from a personal memory system. OLD was \
+recorded before NEW. Return ONLY JSON {\"relation\": \"updates\" | \"same\" | \"different\"}. \
+\"updates\": NEW changes, corrects, or replaces a fact in OLD about the SAME thing (a changed \
+date, time, number, status, place, decision, or preference), so OLD is no longer current. \
+\"same\": NEW only restates OLD. \"different\": they are about different things, or both can \
+be true at once.";
+        let prompt = format!("OLD: {}\nNEW: {}", truncate(&old.text, 400), truncate(&new.text, 400));
+        let raw = self.ollama.generate(model, Some(system), &prompt, true)?;
+        let v = crate::chat::parse_json_lenient(&raw).ok_or_else(|| anyhow!("bad judge JSON"))?;
+        let rel = v["relation"].as_str().unwrap_or_default().to_lowercase();
+        Ok(rel.contains("update"))
+    }
+
+    /// Record `new` as the next version of `old`. Marking the old memory is an
+    /// edit (updated_at moves), so the change propagates on the next sync.
+    fn chain_versions(&self, old: &Memory, new: &Memory) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.set_payload_fields(
+            &old.id,
+            serde_json::json!({ "superseded_by": new.id, "updated_at": now }),
+        )?;
+        self.set_payload_fields(
+            &new.id,
+            serde_json::json!({ "supersedes": old.id, "version": old.version + 1 }),
+        )?;
+        if let Ok(mut g) = self.graph.lock() {
+            let _ = g.add_edge(&new.id, &old.id, "updates");
+        }
+        self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Follow `superseded_by` links to the current version (bounded).
+    fn latest_version(&self, m: Memory) -> Memory {
+        let mut cur = m;
+        for _ in 0..8 {
+            let Some(next) = cur.superseded_by.clone() else { break };
+            match self.get(&next) {
+                Ok(Some(n)) => cur = n,
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// The version chain containing `id`, oldest first (for the UI).
+    pub fn version_chain(&self, id: &str) -> Result<Vec<Memory>> {
+        let Some(start) = self.get(id)? else {
+            return Ok(Vec::new());
+        };
+        let mut chain = vec![start];
+        for _ in 0..8 {
+            let Some(prev) = chain[0].supersedes.clone() else { break };
+            match self.get(&prev)? {
+                Some(p) => chain.insert(0, p),
+                None => break,
+            }
+        }
+        for _ in 0..8 {
+            let Some(next) = chain.last().and_then(|m| m.superseded_by.clone()) else { break };
+            match self.get(&next)? {
+                Some(n) => chain.push(n),
+                None => break,
+            }
+        }
+        Ok(chain)
+    }
+
+    // ---- sync policy (what may leave the device) ------------------------
+
+    /// This device's stable id.
+    pub fn device_id(&self) -> String {
+        self.meta.lock().map(|mut m| m.device_id()).unwrap_or_default()
+    }
+
+    /// The sync decision for a memory. Order: the user's explicit choice;
+    /// derived data (entity hubs) stays local; sensitive content stays local
+    /// (see `policy::scan`); everything else may sync.
+    pub fn sync_decision(&self, m: &Memory) -> SyncDecision {
+        let over = self.meta.lock().ok().and_then(|x| x.policy_override(&m.id));
+        if let Some(share) = over {
+            return if share {
+                SyncDecision::share("user", "Syncs: you allowed it")
+            } else {
+                SyncDecision::local("user", "Stays on device: you chose to keep it local")
+            };
+        }
+        if m.kind == MemoryKind::Entity {
+            return SyncDecision::local("derived", "Stays on device: derived link, rebuilt on each device");
+        }
+        // A topic is only as shareable as its members: if every member is
+        // private, the topic (whose name/summary derive from them) is too.
+        if m.kind == MemoryKind::Topic {
+            if let Ok(members) = self.topic_members(&m.id) {
+                if !members.is_empty() && members.iter().all(|x| !self.member_shareable(x)) {
+                    return SyncDecision::local("derived", "Stays on device: all of its memories are private");
+                }
+            }
+        }
+        if let Some(f) = policy::scan(&format!("{}\n{}", m.title, m.text)) {
+            return SyncDecision::local(f.category, &f.reason);
+        }
+        match m.kind {
+            MemoryKind::Topic | MemoryKind::Summary => {
+                SyncDecision::share("knowledge", "Syncs: consolidated knowledge")
+            }
+            MemoryKind::Document | MemoryKind::DocChunk => {
+                SyncDecision::share("document", "Syncs: document knowledge")
+            }
+            _ => SyncDecision::share("memory", "Syncs: memory"),
+        }
+    }
+
+    /// May this (non-topic) memory's content feed shared artifacts such as
+    /// topic summaries? Same rules as `sync_decision`, without topic recursion.
+    fn member_shareable(&self, m: &Memory) -> bool {
+        if let Some(share) = self.meta.lock().ok().and_then(|x| x.policy_override(&m.id)) {
+            return share;
+        }
+        m.kind != MemoryKind::Entity && policy::scan(&format!("{}\n{}", m.title, m.text)).is_none()
+    }
+
+    /// Stamp the policy decision onto a memory before it is written.
+    fn apply_policy(&self, m: &mut Memory) {
+        let d = self.sync_decision(m);
+        m.sync_reason = d.reason;
+        if d.share {
+            m.sensitivity = Sensitivity::Shareable;
+            if m.sync_state == SyncState::LocalOnly {
+                m.sync_state = SyncState::Pending;
+            }
+        } else {
+            m.sensitivity = Sensitivity::LocalOnly;
+            m.sync_state = SyncState::LocalOnly;
+        }
+    }
+
+    /// User override: allow a memory to sync, or keep it on this device.
+    /// Re-stamps the memory (and a document's chunks) payload-only.
+    pub fn set_sync_override(&self, id: &str, share: bool) -> Result<SyncDecision> {
+        let m = self.get(id)?.ok_or_else(|| anyhow!("memory not found"))?;
+        if let Ok(mut meta) = self.meta.lock() {
+            meta.set_policy_override(id, share)?;
+        }
+        let mut targets = vec![m];
+        if targets[0].kind == MemoryKind::Document {
+            targets.extend(self.scroll_where(Filter {
+                must: Some(vec![match_cond("parent_id", id)]),
+                ..Default::default()
+            })?);
+            if let Ok(mut meta) = self.meta.lock() {
+                for c in targets.iter().skip(1) {
+                    meta.set_policy_override(&c.id, share)?;
+                }
+            }
+        }
+        for t in &targets {
+            let mut t = t.clone();
+            self.apply_policy(&mut t);
+            // Changing the decision is an edit: bump updated_at so sync acts.
+            let now = chrono::Utc::now().to_rfc3339();
+            self.set_payload_fields(
+                &t.id,
+                serde_json::json!({
+                    "sensitivity": t.sensitivity, "sync_state": t.sync_state,
+                    "sync_reason": t.sync_reason, "updated_at": now,
+                }),
+            )?;
+        }
+        self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
+        let m = self.get(id)?.ok_or_else(|| anyhow!("memory not found"))?;
+        Ok(self.sync_decision(&m))
+    }
+
+    /// What stays on the device and why, and what may sync (for the UI).
+    pub fn policy_summary(&self) -> Result<PolicySummary> {
+        let mut s = PolicySummary::default();
+        for m in self.list()? {
+            if m.kind == MemoryKind::Entity {
+                continue;
+            }
+            let d = self.sync_decision(&m);
+            if d.share {
+                s.shared += 1;
+            } else {
+                s.local += 1;
+                *s.local_by_category.entry(d.category.clone()).or_insert(0) += 1;
+                if s.recent_local.len() < 8 {
+                    s.recent_local.push(PolicyItem {
+                        id: m.id.clone(),
+                        title: if m.title.trim().is_empty() {
+                            truncate(&m.text, 60)
+                        } else {
+                            m.title.clone()
+                        },
+                        category: d.category,
+                        reason: d.reason,
+                    });
+                }
+            }
+        }
+        Ok(s)
     }
 
     /// Merge payload fields on a point WITHOUT re-embedding (metadata updates).
@@ -595,9 +893,14 @@ impl MemoryEngine {
 
         // Nothing close: create a topic, named by the hint (e.g. the document's
         // title) or else from the content.
-        let name = match name_hint.map(str::trim).filter(|h| !h.is_empty()) {
-            Some(h) => h.to_string(),
-            None => self.name_topic(&probe, model),
+        // Never derive a name from private content (topic names can sync).
+        let name = if policy::scan(&probe).is_some() {
+            "Private".to_string()
+        } else {
+            match name_hint.map(str::trim).filter(|h| !h.is_empty()) {
+                Some(h) => h.to_string(),
+                None => self.name_topic(&probe, model),
+            }
         };
         Ok(Some(self.create_topic(&name, &[])?))
     }
@@ -756,6 +1059,12 @@ impl MemoryEngine {
         if members.is_empty() {
             return Err(anyhow!("topic has no members"));
         }
+        // Only members that may sync feed the summary: the topic node syncs, so
+        // private content must never leak into it.
+        let members: Vec<Memory> = members.into_iter().filter(|m| self.member_shareable(m)).collect();
+        if members.is_empty() {
+            return Err(anyhow!("topic has no shareable members to summarize"));
+        }
         let mut notes = String::new();
         for m in &members {
             let kind = kind_str(&m.kind);
@@ -795,6 +1104,7 @@ only the memories provided; do not invent facts.";
         }
         topic.text = truncate(&summary, 1200);
         topic.updated_at = chrono::Utc::now().to_rfc3339();
+        topic.sync_state = SyncState::Pending; // policy re-checks on write
         self.upsert(&topic)?;
         self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
         if let Ok(mut m) = self.meta.lock() {
@@ -854,6 +1164,7 @@ only the memories provided; do not invent facts.";
             t.text = name.to_string();
         }
         t.updated_at = chrono::Utc::now().to_rfc3339();
+        t.sync_state = SyncState::Pending; // policy re-checks on write
         self.upsert(&t)?;
         self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
         if let Ok(mut m) = self.meta.lock() {
@@ -1083,9 +1394,21 @@ only the memories provided; do not invent facts.";
     }
 
     /// Remove topics that no longer have members (after merges/moves).
+    /// Only topics created here and never synced are pruned: a synced topic
+    /// may have members on other devices, and deleting it would propagate.
     pub fn prune_empty_topics(&self) -> Result<usize> {
+        let device = self.device_id();
         let mut n = 0;
         for t in self.list_kind(MemoryKind::Topic)? {
+            let foreign = !t.origin.is_empty() && t.origin != device;
+            let ever_synced = self
+                .meta
+                .lock()
+                .map(|m| m.synced_version(&t.id).is_some())
+                .unwrap_or(true);
+            if foreign || ever_synced {
+                continue;
+            }
             if self.topic_member_count(&t.id) == 0 {
                 self.delete(&t.id)?;
                 if let Ok(mut m) = self.meta.lock() {
@@ -1219,6 +1542,10 @@ no explanation.";
                 archived: false,
                 due_at: None,
                 done: false,
+                sync_reason: String::new(),
+                supersedes: None,
+                superseded_by: None,
+                origin: doc.origin.clone(),
             })
             .collect();
         let n = chunk_mems.len();
@@ -1272,24 +1599,78 @@ no explanation.";
         Ok(c)
     }
 
-    fn to_server_point(&self, m: &Memory) -> Result<ServerPoint> {
-        let (dense, sparse) = self.embedders.embed_document(&m.text)?;
-        Ok(ServerPoint {
-            id: uuid_string(&m.id)?,
-            dense,
-            sparse_indices: sparse.indices,
-            sparse_values: sparse.values,
-            payload: serde_json::to_value(m)?,
-        })
+    /// Server points for many memories with ONE batched embedding call.
+    fn to_server_points(&self, mems: &[Memory]) -> Result<Vec<ServerPoint>> {
+        let texts: Vec<String> = mems.iter().map(|m| m.text.clone()).collect();
+        let vectors = self.embedders.embed_documents(&texts)?;
+        mems.iter()
+            .zip(vectors)
+            .map(|(m, (dense, sparse))| {
+                Ok(ServerPoint {
+                    id: uuid_string(&m.id)?,
+                    dense,
+                    sparse_indices: sparse.indices,
+                    sparse_values: sparse.values,
+                    payload: serde_json::to_value(m)?,
+                })
+            })
+            .collect()
     }
 
-    /// Two-way sync with a Qdrant Server. Local-only and entity nodes never
-    /// leave the device. Divergences resolve last-write-wins by `updated_at`.
-    pub fn sync(&self, client: &SyncClient) -> Result<SyncReport> {
+    /// Tiered pull: which remote memories should come down to this device.
+    /// Consolidated knowledge (topics, summaries, documents), scheduled events,
+    /// and this device's own memories always do; other devices' raw memories
+    /// stay in the cloud (searchable via cloud search when online) unless
+    /// `pull_all` mirrors everything.
+    fn pull_eligible(r: &Memory, device: &str, pull_all: bool) -> bool {
+        pull_all
+            || r.origin.is_empty()
+            || r.origin == device
+            || matches!(
+                r.kind,
+                MemoryKind::Topic
+                    | MemoryKind::Summary
+                    | MemoryKind::Document
+                    | MemoryKind::DocChunk
+                    | MemoryKind::Event
+            )
+    }
+
+    /// Keep the losing side of a real conflict as an older version of the
+    /// winner (never drop an edit). Returns the preserved copy.
+    fn preserve_conflict_version(&self, loser: &Memory, winner_id: &str) -> Result<Memory> {
+        let mut copy = loser.clone();
+        copy.id = ulid::Ulid::generate().to_string();
+        copy.superseded_by = Some(winner_id.to_string());
+        copy.supersedes = None;
+        if !copy.tags.iter().any(|t| t == "sync-conflict") {
+            copy.tags.push("sync-conflict".to_string());
+        }
+        copy.sync_state = SyncState::Pending;
+        copy.updated_at = chrono::Utc::now().to_rfc3339();
+        self.upsert(&copy)?;
+        if let Ok(mut g) = self.graph.lock() {
+            let _ = g.add_edge(winner_id, &copy.id, "updates");
+        }
+        Ok(copy)
+    }
+
+    /// Two-way edge <-> cloud sync with a Qdrant Server:
+    ///   1. deletions (tombstones) propagate both ways;
+    ///   2. the sync policy is enforced on every memory (even ones stored before
+    ///      the policy existed); cloud copies of now-private memories are
+    ///      retracted;
+    ///   3. 3-way merge against the last-synced version: if only one side
+    ///      changed, it wins cleanly; if BOTH changed it is a real conflict: the
+    ///      newer edit wins and the other is preserved as an older version;
+    ///   4. tiered pull (see `pull_eligible`), with graph edges rebuilt for
+    ///      pulled memories.
+    pub fn sync(&self, client: &SyncClient, pull_all: bool) -> Result<SyncReport> {
         client.ensure_collection(DENSE_DIM)?;
         client.ensure_tombstone_collection()?;
 
         let mut report = SyncReport::default();
+        let device = self.device_id();
 
         // 1. Reconcile deletions (tombstones) before content.
         let remote_tombs = client.scroll_tombstones()?;
@@ -1331,46 +1712,107 @@ no explanation.";
             }
         }
 
-        // Local syncable memories (shareable, non-entity, non-tombstoned).
-        let local: HashMap<String, Memory> = self
-            .list()?
-            .into_iter()
-            .filter(|m| {
-                m.sensitivity == Sensitivity::Shareable
-                    && m.kind != MemoryKind::Entity
-                    && !tombstoned.contains(&m.id)
-            })
-            .map(|m| (m.id.clone(), m))
-            .collect();
+        // 3. Local side, through the sync policy.
+        let mut local: HashMap<String, Memory> = HashMap::new();
+        let mut retract: Vec<String> = Vec::new();
+        for m in self.list()? {
+            if tombstoned.contains(&m.id) {
+                continue;
+            }
+            let d = self.sync_decision(&m);
+            // Re-stamp stale decisions (payload-only), e.g. memories stored
+            // before the policy existed.
+            let want_state = if d.share { m.sync_state.clone() } else { SyncState::LocalOnly };
+            let want_sens = if d.share { Sensitivity::Shareable } else { Sensitivity::LocalOnly };
+            if m.sync_reason != d.reason || m.sensitivity != want_sens || m.sync_state != want_state {
+                let state = if d.share && want_state == SyncState::LocalOnly {
+                    SyncState::Pending
+                } else {
+                    want_state
+                };
+                let _ = self.set_payload_fields(
+                    &m.id,
+                    serde_json::json!({
+                        "sync_reason": d.reason, "sensitivity": want_sens, "sync_state": state,
+                    }),
+                );
+            }
+            if d.share {
+                local.insert(m.id.clone(), m);
+            } else {
+                if m.kind != MemoryKind::Entity {
+                    report.withheld += 1;
+                    *report.withheld_by.entry(d.category.clone()).or_insert(0) += 1;
+                }
+                // Private now: take any cloud copy back, and never pull it.
+                if remote.remove(&m.id).is_some() {
+                    if let Ok(u) = uuid_string(&m.id) {
+                        retract.push(u);
+                    }
+                    report.retracted += 1;
+                }
+            }
+        }
+        if !retract.is_empty() {
+            client.delete_points(&retract)?;
+        }
 
+        // 4. Reconcile with a 3-way merge against the last-synced version.
         let mut to_push: Vec<Memory> = Vec::new();
         let mut to_pull: Vec<Memory> = Vec::new();
+        let mut agreed: Vec<(String, String)> = Vec::new();
 
-        let mut ids: std::collections::HashSet<&String> = local.keys().collect();
-        ids.extend(remote.keys());
+        let mut ids: Vec<String> = local.keys().cloned().collect();
+        ids.extend(remote.keys().filter(|k| !local.contains_key(*k)).cloned());
+        ids.sort();
 
         for id in ids {
-            match (local.get(id), remote.get(id)) {
+            match (local.get(&id), remote.get(&id)) {
                 (Some(l), None) => to_push.push(l.clone()),
-                (None, Some(r)) => to_pull.push(r.clone()),
-                (Some(l), Some(r)) => {
-                    if l.updated_at == r.updated_at {
-                        // Already in agreement; mark synced if still pending
-                        // (payload-only, no re-embed).
-                        if l.sync_state == SyncState::Pending {
-                            let _ = self.set_payload_fields(
-                                &l.id,
-                                serde_json::json!({ "sync_state": "synced" }),
-                            );
-                        }
+                (None, Some(r)) => {
+                    if Self::pull_eligible(r, &device, pull_all) {
+                        to_pull.push(r.clone());
                     } else {
-                        // Divergence: last write wins, but flag it as a conflict
-                        // that was auto-resolved.
+                        report.cloud_only += 1;
+                    }
+                }
+                (Some(l), Some(r)) if l.updated_at == r.updated_at => {
+                    agreed.push((l.id.clone(), l.updated_at.clone()));
+                    if l.sync_state != SyncState::Synced {
+                        let _ = self.set_payload_fields(
+                            &l.id,
+                            serde_json::json!({ "sync_state": "synced" }),
+                        );
+                    }
+                }
+                (Some(l), Some(r)) => {
+                    let base = self.meta.lock().ok().and_then(|m| m.synced_version(&l.id));
+                    let local_changed = base.as_deref() != Some(l.updated_at.as_str());
+                    let remote_changed = base.as_deref() != Some(r.updated_at.as_str());
+                    let same_content = l.text == r.text && l.title == r.title;
+                    if !remote_changed || (same_content && l.updated_at > r.updated_at) {
+                        to_push.push(l.clone());
+                    } else if !local_changed || same_content {
+                        to_pull.push(r.clone());
+                    } else {
+                        // Real conflict: both sides edited since the last sync.
+                        // The newer edit wins; the other is kept as an older
+                        // version so no information is lost.
                         report.conflicts += 1;
-                        if l.updated_at > r.updated_at {
-                            to_push.push(l.clone());
+                        let local_wins = l.updated_at > r.updated_at;
+                        let (mut winner, loser) =
+                            if local_wins { (l.clone(), r) } else { (r.clone(), l) };
+                        if is_versionable(&winner.kind) {
+                            if let Ok(copy) = self.preserve_conflict_version(loser, &winner.id) {
+                                winner.supersedes = Some(copy.id.clone());
+                                winner.version = l.version.max(r.version) + 1;
+                                to_push.push(copy);
+                            }
+                        }
+                        if local_wins {
+                            to_push.push(winner);
                         } else {
-                            to_pull.push(r.clone());
+                            to_pull.push(winner);
                         }
                     }
                 }
@@ -1378,44 +1820,91 @@ no explanation.";
             }
         }
 
-        // Push: mark synced first so both the server payload and the local copy
-        // agree on sync_state, then upsert to server and to the local shard.
+        // 5. Push (batched embedding), marked synced on both sides.
+        let mut done: Vec<(String, String)> = agreed;
         if !to_push.is_empty() {
-            let synced: Vec<Memory> = to_push
-                .iter()
-                .map(|m| {
-                    let mut mm = m.clone();
-                    mm.sync_state = SyncState::Synced;
-                    mm
+            let pushing: Vec<Memory> = to_push
+                .into_iter()
+                .map(|mut m| {
+                    m.sync_state = SyncState::Synced;
+                    m
                 })
                 .collect();
-            let points: Vec<ServerPoint> = synced
-                .iter()
-                .filter_map(|m| self.to_server_point(m).ok())
-                .collect();
-            client.upsert(&points)?;
-            // Mark local copies synced without re-embedding.
-            for mm in &synced {
-                if self
-                    .set_payload_fields(&mm.id, serde_json::json!({ "sync_state": "synced" }))
-                    .is_ok()
-                {
+            client.upsert(&self.to_server_points(&pushing)?)?;
+            for m in &pushing {
+                // Winners of a conflict may carry a new chain link.
+                let fields = serde_json::json!({
+                    "sync_state": "synced", "supersedes": m.supersedes, "version": m.version,
+                });
+                if self.set_payload_fields(&m.id, fields).is_ok() {
                     report.pushed += 1;
+                    done.push((m.id.clone(), m.updated_at.clone()));
                 }
             }
         }
 
-        // Pull (store remote memory locally, marked synced).
-        for r in &to_pull {
-            let mut mm = r.clone();
+        // 6. Pull, then rebuild the graph edges pulled memories imply.
+        let mut pulled: Vec<Memory> = Vec::new();
+        for r in to_pull {
+            let mut mm = r;
             mm.sync_state = SyncState::Synced;
             if self.upsert(&mm).is_ok() {
                 report.pulled += 1;
+                done.push((mm.id.clone(), mm.updated_at.clone()));
+                pulled.push(mm);
+            }
+        }
+        if !pulled.is_empty() {
+            if let Ok(mut g) = self.graph.lock() {
+                for m in &pulled {
+                    if let (MemoryKind::DocChunk, Some(p)) = (&m.kind, &m.parent_id) {
+                        let _ = g.add_edge(&m.id, p, "part_of");
+                    } else if let Some(t) = &m.topic_id {
+                        let _ = g.add_in_topic(&m.id, t);
+                    }
+                    if let Some(prev) = &m.supersedes {
+                        let _ = g.add_edge(&m.id, prev, "updates");
+                    }
+                }
             }
         }
 
+        if let Ok(mut meta) = self.meta.lock() {
+            let _ = meta.set_synced_versions(&done);
+        }
         self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
         Ok(report)
+    }
+
+    /// Cloud search (online only): hybrid query against the server for
+    /// knowledge that is NOT on this device (other devices' raw memories left
+    /// in the cloud by the tiered pull). Short timeout; errors mean "offline".
+    pub fn cloud_search(
+        &self,
+        client: &SyncClient,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let (dense, sparse) = self.embedders.embed_query(query)?;
+        let hits = client.query(&dense, &sparse.indices, &sparse.values, limit * 3)?;
+        let mut out = Vec::new();
+        for (payload, score) in hits {
+            let Ok(m) = serde_json::from_value::<Memory>(payload) else { continue };
+            // Only what this device does not hold, never outdated versions,
+            // and (defensively) never anything the policy would keep local.
+            if self.get(&m.id)?.is_some()
+                || m.superseded_by.is_some()
+                || m.kind == MemoryKind::Topic
+                || !self.member_shareable(&m)
+            {
+                continue;
+            }
+            out.push(SearchResult { memory: m, score });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     pub fn graph_data(&self) -> Result<GraphData> {
@@ -1439,6 +1928,8 @@ no explanation.";
                 parent_id: m.parent_id.clone(),
                 topic_id: m.topic_id.clone(),
                 salience: m.salience,
+                superseded: m.superseded_by.is_some(),
+                local_only: m.sync_state == SyncState::LocalOnly,
             })
             .collect();
         let edges = self
@@ -1495,7 +1986,8 @@ no explanation.";
             let mut notes = String::new();
             for mid in &mem_ids {
                 if let Some(m) = by_id.get(mid) {
-                    if m.kind == MemoryKind::Summary {
+                    // Summaries sync: never feed them private memories.
+                    if m.kind == MemoryKind::Summary || !self.member_shareable(m) {
                         continue;
                     }
                     notes.push_str("- ");
@@ -1619,10 +2111,12 @@ no explanation.";
 
     /// Active memories that have a due date, earliest first.
     pub fn list_scheduled(&self) -> Result<Vec<Memory>> {
+        // Outdated versions (a rescheduled deadline's old date) are hidden.
         let mut items: Vec<Memory> = self
             .list_active()?
             .into_iter()
             .filter(|m| m.due_at.as_deref().map(|d| !d.is_empty()).unwrap_or(false))
+            .filter(|m| m.superseded_by.is_none())
             .collect();
         items.sort_by(|a, b| a.due_at.cmp(&b.due_at));
         Ok(items)
@@ -1822,6 +2316,34 @@ no explanation.";
             })
             .collect();
         ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Evolving memory: unless the question is about the past, an outdated
+        // version is replaced by its current version ("exam is Friday" ->
+        // "exam moved to Monday"), keeping the rank it earned.
+        let history = is_history_query(query);
+        let mut top_hit = top_hit;
+        if !history {
+            let mut seen = std::collections::HashSet::new();
+            let mut current = Vec::with_capacity(ranked.len());
+            for r in ranked {
+                let r = if r.memory.superseded_by.is_some() {
+                    SearchResult {
+                        memory: self.latest_version(r.memory),
+                        score: r.score,
+                    }
+                } else {
+                    r
+                };
+                if seen.insert(r.memory.id.clone()) {
+                    current.push(r);
+                }
+            }
+            ranked = current;
+            top_hit = top_hit.map(|r| SearchResult {
+                memory: self.latest_version(r.memory),
+                score: r.score,
+            });
+        }
         let mut results = diversify(ranked, limit, t.per_doc_cap);
         // Guarantee the single best raw hit a slot: fusion may reorder evidence
         // but must never drop the strongest direct match entirely.
@@ -2142,6 +2664,93 @@ no explanation.";
 /// Build a JsonPath for a payload field (our field names are simple identifiers).
 fn jpath(field: &str) -> JsonPath {
     field.parse().expect("valid payload field path")
+}
+
+/// Minimum similarity for an older memory to be considered as the one a new
+/// memory updates. Kept low so the LLM judge can see world-knowledge revisions
+/// ("live in Pune" -> "moved to Bangalore"); the rules have their own, much
+/// higher thresholds.
+const VERSION_MIN_SIM: f32 = 0.30;
+
+fn is_versionable(kind: &MemoryKind) -> bool {
+    matches!(
+        kind,
+        MemoryKind::Note | MemoryKind::Observation | MemoryKind::Event | MemoryKind::Measurement
+    )
+}
+
+/// Words signalling that a statement revises an earlier one.
+const UPDATE_CUES: &[&str] = &[
+    "moved to", "moved", "changed", "change to", "now", "no longer", "instead", "updated",
+    "actually", "rescheduled", "switched", "postponed", "pushed to", "pushed back",
+    "not anymore", "anymore", "cancelled", "canceled", "new", "improved", "dropped", "raised",
+    "increased", "decreased", "went up", "went down", "is now", "correction",
+];
+
+/// Deterministic update detection (used without an LLM, and as a fallback).
+/// Conservative: requires high similarity AND a revision signal.
+///   - events: same title, different due date;
+///   - otherwise: similarity >= 0.62 with an update cue ("moved to", "now",
+///     "switched") and a shared content word, or similarity >= 0.72 with a
+///     changed number/date and >= 2 shared content words.
+fn heuristic_updates(old: &Memory, new: &Memory, sim: f32) -> bool {
+    if old.kind == MemoryKind::Event && new.kind == MemoryKind::Event {
+        let same_title = content_words(&old.title) == content_words(&new.title)
+            && !content_words(&new.title).is_empty();
+        if same_title && old.due_at.is_some() && old.due_at != new.due_at {
+            return true;
+        }
+    }
+    let lower = new.text.to_lowercase();
+    let padded = format!(" {} ", lower.replace(|c: char| !c.is_alphanumeric(), " "));
+    let cue = UPDATE_CUES
+        .iter()
+        .any(|c| padded.contains(&format!(" {c} ")));
+    let a = content_words(&old.text);
+    let b = content_words(&new.text);
+    let shared = a.intersection(&b).count();
+    let nums_old = numbers_in(&old.text);
+    let nums_new = numbers_in(&new.text);
+    let changed_number = !nums_new.is_empty() && !nums_old.is_empty() && nums_new != nums_old;
+    // An explicit revision cue on a closely similar statement needs only one
+    // shared subject word ("My EXAM is Friday" -> "My EXAM got moved to
+    // Monday"); a bare number change needs more agreement.
+    (sim >= 0.62 && cue && shared >= 1) || (sim >= 0.72 && changed_number && shared >= 2)
+}
+
+/// Lowercase content words (>= 3 chars, not stopwords).
+fn content_words(text: &str) -> std::collections::HashSet<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "with", "that", "this", "from", "was", "were", "are", "has",
+        "have", "had", "but", "not", "you", "your", "our", "its", "into", "got", "been", "will",
+        "now", "moved", "changed", "new", "instead", "actually", "task", "event",
+    ];
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3 && !STOP.contains(w))
+        .map(String::from)
+        .collect()
+}
+
+/// Numbers and dates mentioned in text (for "a value changed" detection).
+fn numbers_in(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '/'))
+        .map(|t| t.trim_matches(|c| c == '.' || c == '-' || c == '/'))
+        .filter(|t| t.chars().any(|c| c.is_ascii_digit()))
+        .map(String::from)
+        .collect()
+}
+
+/// Does the question ask about the past ("what was it before", "used to")?
+/// Then outdated versions are kept in the answer's context.
+fn is_history_query(query: &str) -> bool {
+    let q = format!(" {} ", query.to_lowercase());
+    [
+        " before", " previously", " used to ", " originally", " history", " changed",
+        " earlier", " old ", " last time", " first ", " was it ", " were they ", " past ",
+    ]
+    .iter()
+    .any(|c| q.contains(c))
 }
 
 fn match_cond(field: &str, value: &str) -> Condition {

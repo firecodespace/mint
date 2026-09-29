@@ -91,7 +91,15 @@ pub fn format_context(results: &[SearchResult]) -> String {
     for (i, r) in results.iter().enumerate() {
         let m = &r.memory;
         let text = truncate(&m.text, 400);
-        out.push_str(&format!("{}. [{:?}] {}", i + 1, m.kind, m.title));
+        // Version chains: tell the model which facts are current.
+        let status = if m.superseded_by.is_some() {
+            " (OUTDATED: replaced by a newer memory)"
+        } else if m.supersedes.is_some() {
+            " (current: updates an earlier memory)"
+        } else {
+            ""
+        };
+        out.push_str(&format!("{}. [{:?}]{status} {}", i + 1, m.kind, m.title));
         if !m.title.is_empty() {
             out.push_str(": ");
         }
@@ -100,6 +108,19 @@ pub fn format_context(results: &[SearchResult]) -> String {
             out.push_str(&format!(" (tags: {})", m.tags.join(", ")));
         }
         out.push('\n');
+    }
+    out
+}
+
+/// Memories from the user's OTHER devices, found through cloud search while
+/// online (labeled so the model knows their provenance).
+pub fn format_cloud_context(results: &[SearchResult]) -> String {
+    if results.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nFrom the user's other devices (cloud):\n");
+    for r in results {
+        out.push_str(&format!("- {}\n", truncate(&r.memory.text, 400)));
     }
     out
 }

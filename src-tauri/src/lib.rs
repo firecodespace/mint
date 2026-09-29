@@ -47,11 +47,17 @@ pub fn run() {
             let fast_model = choose_model("MINT_FAST_MODEL", DEFAULT_FAST_MODEL, &available);
             log::info!("Ollama chat model: {chat_model} | fast model: {fast_model}");
 
+            let engine = Arc::new(Mutex::new(engine));
+            let sync = Arc::new(Mutex::new(SyncRuntime::default()));
+            // Edge <-> cloud: sync automatically on reconnect, on pending
+            // changes, and periodically (all network calls time out quickly).
+            commands::spawn_auto_sync(app.handle().clone(), engine.clone(), sync.clone());
+
             app.manage(AppState {
-                engine: Arc::new(Mutex::new(engine)),
+                engine,
                 conversations: Arc::new(Mutex::new(conversations)),
                 ollama: Arc::new(ollama),
-                sync: Arc::new(Mutex::new(SyncRuntime::default())),
+                sync,
                 chat_model,
                 fast_model,
             });
@@ -88,6 +94,11 @@ pub fn run() {
             commands::move_to_topic,
             commands::refresh_topic,
             commands::organize_topics,
+            commands::set_auto_sync,
+            commands::set_pull_all,
+            commands::policy_summary,
+            commands::set_sync_override,
+            commands::version_chain,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

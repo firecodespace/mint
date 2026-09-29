@@ -1036,9 +1036,10 @@ ul {
   stroke-width: 1.4;
 }
 .graph-edge.related {
-  stroke: var(--line);
+  stroke: #46a0a8;
   stroke-width: 1;
-  stroke-dasharray: 3 3;
+  stroke-opacity: 0.3;
+  stroke-dasharray: 4 4;
 }
 .graph-legend {
   position: absolute;

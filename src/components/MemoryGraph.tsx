@@ -116,7 +116,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
 
   // Build nodes/edges and settle the layout ONCE (synchronously) so the graph
   // appears already arranged instead of animating from chaos on every open.
-  const { nodes, edges, byId } = useMemo(() => {
+  const { nodes, edges, byId, layoutEdges } = useMemo(() => {
     const src = data?.nodes ?? [];
     const n = src.length;
     const ns: Node[] = src.map((node, i) => {
@@ -135,21 +135,20 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
         vy: 0,
       };
     });
-    // Drop the noisy kNN "related" edges (those were the long crossing lines).
-    const es: Edge[] = (data?.edges ?? [])
-      .filter((e) => e.relation !== "related")
-      .map((e) => ({ a: e.from, b: e.to, relation: e.relation }));
+    // All relationships: part_of (doc->chunk), mentions (->entity), and related
+    // (memory<->memory similarity). "related" renders faint so it shows the web
+    // without dominating.
+    const es: Edge[] = (data?.edges ?? []).map((e) => ({
+      a: e.from,
+      b: e.to,
+      relation: e.relation,
+    }));
+    // The layout is driven ONLY by structure (part_of + mentions) so it stays
+    // stable; "related" edges are drawn but do not pull nodes around.
+    const layoutEdges = es.filter((e) => e.relation !== "related");
     const map = new Map(ns.map((x) => [x.id, x]));
-    for (let k = 0; k < SETTLE_ITERS; k++) tick(ns, es, map);
-    // Children that move with a node on drag (a document's chunks; part_of goes
-    // chunk(from) -> document(to)).
-    const children = new Map<string, string[]>();
-    for (const e of es) {
-      if (e.relation === "part_of") {
-        (children.get(e.b) ?? children.set(e.b, []).get(e.b)!).push(e.a);
-      }
-    }
-    return { nodes: ns, edges: es, byId: map, childrenMap: children };
+    for (let k = 0; k < SETTLE_ITERS; k++) tick(ns, layoutEdges, map);
+    return { nodes: ns, edges: es, byId: map, layoutEdges };
   }, [data]);
 
   const nodesRef = useRef<Node[]>(nodes);
@@ -176,7 +175,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
 
   /** Animation loop runs ONLY while dragging / cooling down. */
   function animate() {
-    tick(nodesRef.current, edges, byId);
+    tick(nodesRef.current, layoutEdges, byId);
     paint();
     if (dragId.current || coolRef.current > 0) {
       coolRef.current = Math.max(0, coolRef.current - 1);

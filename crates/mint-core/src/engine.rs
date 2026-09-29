@@ -138,7 +138,9 @@ impl MemoryEngine {
     /// Create keyword/datetime payload indexes for the fields we filter on.
     /// Idempotent across runs; re-creating an existing index is ignored.
     fn ensure_indexes(&self) {
-        let keyword_fields = ["kind", "site_id", "asset_id", "tags", "sync_state", "source"];
+        let keyword_fields = [
+            "kind", "site_id", "asset_id", "tags", "sync_state", "source", "parent_id",
+        ];
         for field in keyword_fields {
             self.create_index(field, PayloadSchemaType::Keyword);
         }
@@ -934,6 +936,146 @@ impl MemoryEngine {
             latency_ms: started.elapsed().as_secs_f64() * 1000.0,
             mode: req.mode,
         })
+    }
+
+    /// Retrieval for chat: semantic search PLUS document-reference awareness.
+    /// If the query names a document ("my resume", "the study guide"), that
+    /// document's most relevant chunks are pulled in even when the query words
+    /// don't appear in it. Referenced-document content is prioritized.
+    pub fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let base = self
+            .search(SearchRequest {
+                query: query.to_string(),
+                mode: SearchMode::Hybrid,
+                limit,
+                site_id: None,
+                kind: None,
+            })?
+            .results;
+
+        let refs = self.referenced_documents(query).unwrap_or_default();
+        if refs.is_empty() {
+            return Ok(base);
+        }
+
+        let (dense, sparse) = self.embedders.embed_query(query)?;
+        let per_doc = if refs.len() == 1 { 4 } else { 2 };
+        let mut injected: Vec<SearchResult> = Vec::new();
+        for doc_id in &refs {
+            if let Ok(hits) = self.search_in_doc(&dense, &sparse, doc_id, per_doc) {
+                injected.extend(hits);
+            }
+        }
+
+        // Referenced-document chunks first, then the semantic results; dedup.
+        let mut seen = std::collections::HashSet::new();
+        let mut merged: Vec<SearchResult> = Vec::new();
+        for r in injected.into_iter().chain(base.into_iter()) {
+            if seen.insert(r.memory.id.clone()) {
+                merged.push(r);
+            }
+        }
+        merged.truncate(limit);
+        Ok(merged)
+    }
+
+    /// Documents whose title is referenced by the query (word overlap).
+    fn referenced_documents(&self, query: &str) -> Result<Vec<String>> {
+        let q = query.to_lowercase();
+        let qwords: std::collections::HashSet<String> = q
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 3)
+            .map(String::from)
+            .collect();
+        if qwords.is_empty() {
+            return Ok(Vec::new());
+        }
+        const STOP: &[&str] = &[
+            "pdf", "doc", "docx", "txt", "the", "and", "for", "file", "final", "copy", "new",
+            "old", "version", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+            "oct", "nov", "dec",
+        ];
+        let mut refs = Vec::new();
+        for m in self.list_documents()? {
+            let title = m.title.to_lowercase();
+            let matched = title
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.len() >= 3 && !STOP.contains(w) && !w.chars().all(|c| c.is_numeric()))
+                .any(|tw| {
+                    qwords
+                        .iter()
+                        .any(|qw| tw.contains(qw.as_str()) || qw.contains(tw))
+                });
+            if matched {
+                refs.push(m.id);
+            }
+        }
+        Ok(refs)
+    }
+
+    /// Hybrid search restricted to the chunks of one document.
+    fn search_in_doc(
+        &self,
+        dense: &[f32],
+        sparse: &qdrant_edge::SparseVector,
+        doc_id: &str,
+        top: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let filter = Filter {
+            must: Some(vec![Condition::Field(FieldCondition::new_match(
+                jpath("parent_id"),
+                Match::from(doc_id.to_string()),
+            ))]),
+            ..Default::default()
+        };
+        let builder = QueryRequestBuilder::new(top)
+            .with_payload(WithPayloadInterface::Bool(true))
+            .add_prefetch(
+                PrefetchBuilder::new(PREFETCH_LIMIT)
+                    .query(nearest(DENSE_NAME, VectorInternal::Dense(dense.to_vec())))
+                    .filter(filter.clone())
+                    .build(),
+            )
+            .add_prefetch(
+                PrefetchBuilder::new(PREFETCH_LIMIT)
+                    .query(nearest(SPARSE_NAME, VectorInternal::Sparse(sparse.clone())))
+                    .filter(filter.clone())
+                    .build(),
+            )
+            .query(ScoringQuery::Fusion(Fusion::Rrf {
+                k: 60,
+                weights: None,
+            }));
+        let scored = self
+            .shard
+            .query(builder.build())
+            .map_err(|e| anyhow!("doc query failed: {e}"))?;
+        let (archived, tombstoned) = self
+            .meta
+            .lock()
+            .map(|m| {
+                (
+                    m.archived_ids().clone(),
+                    m.tombstones()
+                        .keys()
+                        .cloned()
+                        .collect::<std::collections::HashSet<_>>(),
+                )
+            })
+            .unwrap_or_default();
+        Ok(scored
+            .into_iter()
+            .filter_map(|sp| {
+                let memory = memory_from_payload(sp.payload.as_ref())?;
+                if archived.contains(&memory.id) || tombstoned.contains(&memory.id) {
+                    return None;
+                }
+                Some(SearchResult {
+                    memory,
+                    score: sp.score,
+                })
+            })
+            .collect())
     }
 
     /// All memories, newest first.

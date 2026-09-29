@@ -801,6 +801,28 @@ ul {
 .graph-edge {
   stroke: var(--line);
   stroke-width: 1;
+  stroke-opacity: 0.28;
+  transition: stroke-opacity 0.15s;
+}
+/* Click-to-focus: dim everything except the selected node's connections. */
+.graph-edge.hot {
+  stroke-opacity: 0.95;
+  stroke-width: 1.8;
+}
+.graph-edge.cold {
+  stroke-opacity: 0.03;
+}
+.graph-node {
+  transition: opacity 0.15s;
+}
+.graph-node.far {
+  opacity: 0.18;
+}
+.graph-node.near circle {
+  filter: drop-shadow(0 0 5px rgba(230, 237, 243, 0.55));
+}
+.graph-node.near text {
+  fill: #fff;
 }
 .graph-hub circle {
   fill: var(--panel-2);
@@ -827,6 +849,11 @@ ul {
 .graph-node.sel circle {
   stroke: #fff;
   stroke-width: 2;
+  filter: drop-shadow(0 0 7px rgba(255, 255, 255, 0.7));
+}
+.graph-node.sel text {
+  fill: #fff;
+  font-weight: 600;
 }
 .graph-node.observation circle {
   fill: #7dd3fc;
@@ -965,7 +992,7 @@ ul {
 }
 .graph-node.doc_chunk circle {
   fill: #6ee7b7;
-  opacity: 0.75;
+  opacity: 0.5;
 }
 .graph-node.entity circle {
   fill: #fbbf24;
@@ -1071,6 +1098,18 @@ ul {
   color: var(--muted);
   opacity: 0.7;
   font-style: italic;
+}
+.chunk-toggle {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.chunk-toggle:hover {
+  border-color: var(--accent);
 }
 
 /* Vault */

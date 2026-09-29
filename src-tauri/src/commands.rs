@@ -8,12 +8,35 @@ use tauri::{AppHandle, Emitter, State};
 use base64::Engine as _;
 use mint_core::chat::{extract_memories, format_context, system_prompt};
 use mint_core::conversations::{Conversation, ConversationStore, ConversationSummary};
+use mint_core::engine::SyncCounts;
 use mint_core::graph::GraphData;
 use mint_core::ollama::{ChatMessage, Delta, Ollama};
 use mint_core::record::{
     Memory, MemoryKind, NewMemory, SearchMode, SearchRequest, SearchResponse, Stats,
 };
+use mint_core::sync::{SyncClient, SyncConfig, SyncReport};
 use mint_core::MemoryEngine;
+
+/// Sync runtime: the online toggle (airplane mode) + server config + last result.
+pub struct SyncRuntime {
+    pub online: bool,
+    pub cfg: SyncConfig,
+    pub last_sync: Option<String>,
+    pub last_report: Option<SyncReport>,
+}
+
+impl Default for SyncRuntime {
+    fn default() -> Self {
+        let url = std::env::var("QDRANT_URL").unwrap_or_else(|_| "http://localhost:6333".into());
+        let api_key = std::env::var("QDRANT_API_KEY").ok().filter(|k| !k.is_empty());
+        Self {
+            online: true,
+            cfg: SyncConfig { url, api_key },
+            last_sync: None,
+            last_report: None,
+        }
+    }
+}
 
 /// Similarity above which an auto-captured memory is treated as a duplicate.
 const DEDUP_THRESHOLD: f32 = 0.90;

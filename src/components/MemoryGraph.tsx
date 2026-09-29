@@ -7,6 +7,8 @@ import {
   organizeTopics,
   refreshTopic,
   renameTopic,
+  setSyncOverride,
+  versionChain,
 } from "../api";
 import type { GraphData, Memory, TopicInfo } from "../types";
 
@@ -17,6 +19,7 @@ interface Node {
   isChunk: boolean;
   salience: number;
   topicId: string | null;
+  superseded: boolean;
   x: number;
   y: number;
   vx: number;
@@ -141,11 +144,22 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
       .catch(() => setTopics([]));
   }, [memories.length, reload]);
 
+  // Selected memory's version history and (after a toggle) its sync decision.
+  const [chain, setChain] = useState<Memory[]>([]);
+  const [decision, setDecision] = useState<{ share: boolean; reason: string } | null>(null);
+
   useEffect(() => {
     setRenameVal("");
     setMergeTarget("");
     setActionError(null);
-  }, [selected]);
+    setDecision(null);
+    setChain([]);
+    if (selected) {
+      versionChain(selected)
+        .then((c) => setChain(c.length > 1 ? c : []))
+        .catch(() => setChain([]));
+    }
+  }, [selected, reload]);
 
   /** Run a topic action, then refetch graph + topics. */
   async function act(kind: string, fn: () => Promise<unknown>) {
@@ -177,6 +191,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
         isChunk: node.kind === "doc_chunk",
         salience: node.salience,
         topicId: node.topic_id ?? null,
+        superseded: !!node.superseded,
         x: W / 2 + Math.cos(ang) * rad,
         y: H / 2 + Math.sin(ang) * rad,
         vx: 0,
@@ -259,6 +274,9 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
       mentions: byRel["mentions"] || 0,
       related: byRel["related"] || 0,
       inTopic: byRel["in_topic"] || 0,
+      updates: byRel["updates"] || 0,
+      outdated: srcNodes.filter((n) => n.superseded).length,
+      deviceOnly: srcNodes.filter((n) => n.local_only && n.kind !== "entity").length,
       topics: byKind["topic"] || 0,
       clusters,
       recent,
@@ -430,7 +448,9 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
               gRefs.current.set(n.id, el);
             }}
             transform={`translate(${n.x},${n.y})`}
-            className={`graph-node ${n.kind} ${selected === n.id ? "sel" : ""}${focusClass(n)}`}
+            className={`graph-node ${n.kind} ${selected === n.id ? "sel" : ""}${
+              n.superseded ? " outdated" : ""
+            }${focusClass(n)}`}
             onMouseDown={(e) => {
               e.preventDefault();
               dragId.current = n.id;
@@ -492,6 +512,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
           <div className="gp-row"><i className="lg c-part" /><span>Document source</span><b>{stats.partOf}</b></div>
           <div className="gp-row"><i className="lg c-mention" /><span>Entity mentions</span><b>{stats.mentions}</b></div>
           <div className="gp-row"><i className="lg c-topic" /><span>Topic membership</span><b>{stats.inTopic}</b></div>
+          <div className="gp-row"><i className="lg c-update" /><span>Updates</span><b>{stats.updates}</b></div>
           <div className="gp-row"><i className="lg c-related" /><span>Related</span><b>{stats.related}</b></div>
         </div>
         <div className="gp-section">
@@ -502,6 +523,9 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
           <h4>Memory status</h4>
           <div className="gp-row"><i className="dot-stat recent" /><span>Recent (&lt; 24h)</span><b>{stats.recent}</b></div>
           <div className="gp-row"><i className="dot-stat expiring" /><span>Expiring soon</span><b>{stats.expiring}</b></div>
+          <div className="gp-row"><i className="dot-stat chain" /><span>Update chains</span><b>{stats.updates}</b></div>
+          <div className="gp-row"><i className="dot-stat outdated" /><span>Outdated versions</span><b>{stats.outdated}</b></div>
+          <div className="gp-row"><i className="dot-stat device" /><span>On device only</span><b>{stats.deviceOnly}</b></div>
           <div className="gp-row"><i className="dot-stat forgotten" /><span>Forgotten (archived)</span><b>{stats.forgotten}</b></div>
         </div>
         {actionError && !selected && <div className="gp-error">{actionError}</div>}
@@ -600,6 +624,53 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
             {sel.source && <span>source: {sel.source}</span>}
             <span className={`sync ${sel.sync_state}`}>{sel.sync_state}</span>
           </div>
+          {sel.kind !== "entity" && (
+            <div className="gd-sync">
+              {(() => {
+                const localOnly = decision ? !decision.share : sel.sync_state === "local_only";
+                const reason = decision?.reason ?? sel.sync_reason;
+                return (
+                  <>
+                    <span className={`sync-badge ${localOnly ? "local" : "shared"}`}>
+                      {localOnly ? "On this device only" : "May sync"}
+                    </span>
+                    {reason && <span className="muted gd-reason">{reason}</span>}
+                    {sel.kind !== "doc_chunk" && (
+                      <button
+                        className="ghost"
+                        disabled={!!busy}
+                        onClick={() =>
+                          act("policy", async () => {
+                            const d = await setSyncOverride(sel.id, localOnly);
+                            setDecision({ share: d.share, reason: d.reason });
+                          })
+                        }
+                      >
+                        {localOnly ? "Allow sync" : "Keep on device"}
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          )}
+          {chain.length > 1 && (
+            <div className="gd-chain">
+              <span className="gd-label">Version history</span>
+              <ol>
+                {chain.map((m, i) => (
+                  <li key={m.id} className={m.id === sel.id ? "cur" : ""}>
+                    <button className="linklike" onClick={() => setSelected(m.id)}>
+                      <b>v{i + 1}</b> {m.text}
+                    </button>
+                    <span className={m.superseded_by ? "muted" : "chain-current"}>
+                      {m.superseded_by ? "outdated" : "current"}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
           {sel.kind !== "doc_chunk" && sel.kind !== "entity" && topicRows.length > 0 && (
             <div className="gd-actions">
               <div className="gd-field">

@@ -329,6 +329,11 @@ export function Chat({
               {retrieved.map((r) => (
                 <li key={r.id}>
                   <span className={`pill ${r.kind}`}>{r.kind}</span>
+                  {r.source === "cloud" && (
+                    <span className="pill cloud" title="From another device, via cloud search">
+                      cloud
+                    </span>
+                  )}
                   <span className="cog-title">{r.title || "(untitled)"}</span>
                   <span className="cog-score">{r.score.toFixed(2)}</span>
                 </li>

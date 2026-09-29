@@ -45,6 +45,13 @@ export interface Memory {
   archived: boolean;
   due_at: string | null;
   done: boolean;
+  /** Why this memory may (or may not) leave the device. */
+  sync_reason: string;
+  /** Version chain: the older memory this one replaces / the newer one that replaced it. */
+  supersedes: string | null;
+  superseded_by: string | null;
+  /** Device that created this memory. */
+  origin: string;
 }
 
 // Input for creating a memory (engine fills id/timestamps/engine-managed fields).
@@ -104,6 +111,8 @@ export interface RetrievedItem {
   title: string;
   kind: string;
   score: number;
+  /** "device" (on-device memory) or "cloud" (another device, via cloud search). */
+  source: "device" | "cloud";
 }
 
 export interface CapturedItem {
@@ -163,6 +172,10 @@ export interface GraphNode {
   parent_id: string | null;
   topic_id: string | null;
   salience: number;
+  /** Replaced by a newer version. */
+  superseded: boolean;
+  /** Kept on this device by the sync policy. */
+  local_only: boolean;
 }
 
 /** An organizing subject (schema node) with its rolling summary. */
@@ -220,7 +233,43 @@ export interface SyncCounts {
 export interface SyncReport {
   pushed: number;
   pulled: number;
+  /** Edits on BOTH sides since the last sync; the losing edit is kept as an older version. */
   conflicts: number;
+  /** Kept on this device by the sync policy. */
+  withheld: number;
+  withheld_by: Record<string, number>;
+  /** Cloud copies removed because the memory became private. */
+  retracted: number;
+  /** Other devices' raw memories left in the cloud (tiered pull). */
+  cloud_only: number;
+}
+
+export interface SyncEvent {
+  at: string;
+  trigger: string;
+  ok: boolean;
+  report: SyncReport | null;
+  error: string | null;
+}
+
+export interface SyncDecision {
+  share: boolean;
+  category: string;
+  reason: string;
+}
+
+export interface PolicyItem {
+  id: string;
+  title: string;
+  category: string;
+  reason: string;
+}
+
+export interface PolicySummary {
+  shared: number;
+  local: number;
+  local_by_category: Record<string, number>;
+  recent_local: PolicyItem[];
 }
 
 export interface SyncStatus {
@@ -230,4 +279,8 @@ export interface SyncStatus {
   counts: SyncCounts;
   last_sync: string | null;
   last_report: SyncReport | null;
+  auto: boolean;
+  pull_all: boolean;
+  device_id: string;
+  history: SyncEvent[];
 }

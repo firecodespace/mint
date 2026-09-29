@@ -117,6 +117,33 @@ named documents ("my resume", "coresum", "HCMA") are injected, and everything is
 with weighted reciprocal-rank fusion. Chat receives the subject overview first, then
 the individual memories.
 
+## Edge <-> cloud: what stays, what syncs, how conflicts resolve
+
+**Sync policy (decided per memory, with a stated reason).** A deterministic, on-device
+scan runs on every write and again at sync time. Secrets (passwords, API keys,
+tokens, private keys), financial details (Luhn-checked card numbers, bank/IBAN
+numbers), government IDs, personal health facts (first-person only, so a research
+paper about cancer still syncs), and contact details stay on the device. Entity hubs
+are derived and rebuilt per device. Topic summaries are built only from shareable
+members, and a topic whose members are all private stays private, so nothing leaks
+through a summary. You can override any decision; making something private retracts
+its cloud copy.
+
+**Evolving and conflicting information.** When a new fact revises an older one ("my
+exam moved to Monday"), the older memory is marked superseded and chained to the new
+one (deterministic rules first, then the local chat model as judge). Retrieval answers
+from the current version, the timeline hides outdated deadlines, and the graph shows
+the version history. Sync uses a 3-way merge against the last-synced version: if only
+one side changed, it wins cleanly; if both changed, the newer edit wins and the other
+is preserved as an older version, so no edit is ever lost.
+
+**Tiered edge-to-cloud memory.** Each device pushes what the policy allows. It pulls
+consolidated knowledge (topics, summaries, documents, events) and its own memories;
+other devices' raw notes stay in the cloud and are reached through cloud search when
+online (short timeout, labeled "cloud" in chat). Offline, everything works locally.
+Auto-sync runs on reconnect, on pending changes, and every two minutes, with an
+activity log in the Sync view.
+
 ## Benchmarks and tests
 
 A labeled benchmark lives in `crates/mint-core/examples/bench`: documents and notes
@@ -146,6 +173,19 @@ Current results vs. the original pipeline (chat retrieval, local LLM mode):
 | p50 latency | 7.8 ms | 4.7 ms |
 | Topic pairwise F1 | 0.733 | 0.944 (0 impure topics with 150 distractors) |
 | Capture-guard accuracy | 0.917 | 1.000 |
+
+Edge <-> cloud (added with the sync policy and version chains):
+
+| Check | Result |
+|---|---|
+| Sync policy, 34 labeled cases | precision 1.000, recall 1.000, category accuracy 1.000 |
+| Sync policy false positives on the research corpus | 0 of 26 items |
+| Version chains, 14 cases (rules only) | precision 1.000, recall 0.750 |
+| Version chains, 14 cases (rules + qwen3:8b judge) | precision 1.000, recall 0.875; current version ranked first 1.000 |
+| Two-device sync against a real Qdrant Server | 7 of 7 scenarios pass (privacy, retraction, tiered sharing + cloud search, one-sided edits, concurrent edits kept as versions, deletions, offline) |
+
+The sync tests (`cargo test --release --test sync`) use throwaway collections on the
+server at `QDRANT_URL` (default `localhost:6333`) and skip if none is running.
 
 ## Development notes
 

@@ -12,9 +12,11 @@ import type {
   Memory,
   NewMemory,
   OrganizeReport,
+  PolicySummary,
   SearchRequest,
   SearchResponse,
   Stats,
+  SyncDecision,
   SyncReport,
   SyncStatus,
   TopicInfo,
@@ -110,6 +112,29 @@ export function setServerUrl(url: string): Promise<void> {
 
 export function syncNow(): Promise<SyncReport> {
   return invoke<SyncReport>("sync_now");
+}
+
+export function setAutoSync(enabled: boolean): Promise<void> {
+  return invoke<void>("set_auto_sync", { enabled });
+}
+
+export function setPullAll(enabled: boolean): Promise<void> {
+  return invoke<void>("set_pull_all", { enabled });
+}
+
+/** What stays on this device and why (sync policy overview). */
+export function policySummary(): Promise<PolicySummary> {
+  return invoke<PolicySummary>("policy_summary");
+}
+
+/** Allow a memory to sync, or keep it on this device. */
+export function setSyncOverride(id: string, share: boolean): Promise<SyncDecision> {
+  return invoke<SyncDecision>("set_sync_override", { id, share });
+}
+
+/** A memory's version chain, oldest first. */
+export function versionChain(id: string): Promise<Memory[]> {
+  return invoke<Memory[]>("version_chain", { id });
 }
 
 // ---- maintenance ---------------------------------------------------------

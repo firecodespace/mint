@@ -165,3 +165,10 @@ Salience routing keeps the store signal-rich.
   and integration tests added; chat retrieval MRR 0.660 -> 1.000, topic F1 0.733 ->
   0.944. Batched ingestion (3x per-chunk), indexed lookups, optimized dev deps.
   Still open: localhost API, CLI/git hooks, secrets vault, procedural memory, images.
+- 2026-09-30: Edge <-> cloud intelligence. Sync policy engine (secrets, financial,
+  government IDs, personal health, contact details stay local, with reasons and user
+  overrides; retraction of now-private cloud copies; leak-proof topic summaries).
+  Version chains for evolving/conflicting facts (rules + chat-model judge). 3-way
+  merge sync where conflicts become version chains, device identity, tiered pull,
+  cloud search in chat, auto-sync with activity log, network timeouts. Two-device
+  integration tests against a real Qdrant Server.

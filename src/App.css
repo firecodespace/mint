@@ -1021,6 +1021,10 @@ ul {
   fill: #fda4af;
   font-weight: 700;
 }
+.pill.cloud {
+  color: #7dd3fc;
+  border-color: rgba(125, 211, 252, 0.45);
+}
 .pill.topic {
   color: #fb7185;
   border-color: rgba(251, 113, 133, 0.4);
@@ -1209,6 +1213,104 @@ button.gp-action {
 }
 .graph-node.dim {
   opacity: 0.12;
+}
+.graph-node.outdated circle {
+  opacity: 0.45;
+  stroke-dasharray: 2 2;
+}
+.graph-node.outdated text {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+.graph-edge.updates {
+  stroke: #fb923c;
+  stroke-width: 1.5;
+  stroke-opacity: 0.85;
+  stroke-dasharray: 5 3;
+}
+.lg.c-update {
+  background: #fb923c;
+}
+.dot-stat.chain {
+  background: #fb923c;
+}
+.dot-stat.outdated {
+  background: transparent;
+  border: 1px dashed #94a3b8;
+}
+.dot-stat.device {
+  background: #f87171;
+}
+.gd-sync {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.gd-reason {
+  flex: 1 1 100%;
+  order: 3;
+}
+.sync-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--line);
+}
+.sync-badge.local {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.45);
+}
+.sync-badge.shared {
+  color: var(--accent);
+  border-color: rgba(52, 211, 153, 0.45);
+}
+.gd-sync .ghost {
+  margin-left: auto;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.gd-chain {
+  margin-top: 12px;
+}
+.gd-chain ol {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.gd-chain li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+.gd-chain li.cur .linklike {
+  color: var(--text);
+}
+.gd-chain .chain-current {
+  color: var(--accent);
+  white-space: nowrap;
+}
+.gd-chain .muted {
+  white-space: nowrap;
+}
+button.linklike {
+  flex: 1;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  text-align: left;
+  color: #b7c4d0;
+  cursor: pointer;
+  font: inherit;
+}
+button.linklike:hover {
+  color: var(--text);
 }
 .graph-node.hot circle {
   filter: drop-shadow(0 0 6px rgba(251, 113, 133, 0.6));
@@ -1532,6 +1634,112 @@ button.gp-action {
   font-size: 14px;
   color: #cdd7e0;
   margin-bottom: 12px;
+}
+.device-id {
+  font-size: 11px;
+  margin: 10px 0 0;
+  word-break: break-all;
+}
+.policy-card,
+.activity-card {
+  margin-bottom: 16px;
+}
+.policy-totals {
+  margin-left: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+.policy-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.policy-chip {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: #cdd7e0;
+}
+.policy-chip b {
+  margin-left: 4px;
+  color: var(--text);
+}
+.policy-chip.secret,
+.policy-chip.financial,
+.policy-chip.government_id {
+  border-color: rgba(248, 113, 113, 0.45);
+}
+.policy-chip.health,
+.policy-chip.contact {
+  border-color: rgba(251, 191, 36, 0.45);
+}
+.policy-list,
+.activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.policy-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.policy-list li > div {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.policy-list strong {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.policy-list .muted {
+  font-size: 12px;
+}
+.policy-list .ghost {
+  padding: 4px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.activity-list li {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  color: #cdd7e0;
+}
+.activity-list li.failed .act-detail {
+  color: #fca5a5;
+}
+.act-time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.act-trigger {
+  color: var(--accent);
+  flex-shrink: 0;
+  min-width: 110px;
+}
+.act-detail {
+  flex: 1;
+  min-width: 0;
+}
+@media (max-width: 720px) {
+  .sync-grid {
+    grid-template-columns: 1fr;
+  }
 }
 .sync-help {
   background: var(--panel);

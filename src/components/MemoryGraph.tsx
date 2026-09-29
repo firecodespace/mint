@@ -114,8 +114,6 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const gRefs = useRef<Map<string, SVGGElement | null>>(new Map());
   const lineRefs = useRef<(SVGLineElement | null)[]>([]);
-  const rafRef = useRef(0);
-  const coolRef = useRef(0);
 
   useEffect(() => {
     graphData().then(setData).catch(console.error);
@@ -188,42 +186,26 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes]);
 
-  function paint() {
-    for (const n of nodesRef.current) {
-      const g = gRefs.current.get(n.id);
-      if (g) g.setAttribute("transform", `translate(${n.x},${n.y})`);
+  // Move the dragged node's <g> and only the edges touching it (cheap, no sim).
+  function paintDragged(id: string) {
+    const n = byId.get(id);
+    if (!n) return;
+    const g = gRefs.current.get(id);
+    if (g && Number.isFinite(n.x) && Number.isFinite(n.y)) {
+      g.setAttribute("transform", `translate(${n.x},${n.y})`);
     }
     edges.forEach((e, i) => {
+      if (e.a !== id && e.b !== id) return;
       const line = lineRefs.current[i];
-      if (!line) return;
       const a = byId.get(e.a);
       const b = byId.get(e.b);
-      if (!a || !b) return;
+      if (!line || !a || !b) return;
       line.setAttribute("x1", String(a.x));
       line.setAttribute("y1", String(a.y));
       line.setAttribute("x2", String(b.x));
       line.setAttribute("y2", String(b.y));
     });
   }
-
-  function animate() {
-    tick(nodesRef.current, edges, byId);
-    paint();
-    if (dragId.current || coolRef.current > 0) {
-      coolRef.current = Math.max(0, coolRef.current - 1);
-      rafRef.current = requestAnimationFrame(animate);
-    } else {
-      rafRef.current = 0;
-    }
-  }
-  function kick() {
-    coolRef.current = 45;
-    if (!rafRef.current) rafRef.current = requestAnimationFrame(animate);
-  }
-
-  useEffect(() => () => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-  }, []);
 
   useEffect(() => {
     const svg = svgRef.current;

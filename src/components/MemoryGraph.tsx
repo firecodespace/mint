@@ -20,15 +20,16 @@ interface Edge {
   relation: string;
 }
 
-const W = 960;
-const H = 640;
-const REPULSE = 4200;
-const SPRING = 0.03;
-const LINK_PART = 55; // chunk -> document (tight cluster)
-const LINK_MENTION = 85; // memory -> entity hub
-const LINK_REL = 120; // related memories (looser)
-const CENTER = 0.006;
-const DAMP = 0.86;
+const W = 1000;
+const H = 680;
+const REPULSE = 3600;
+const SPRING = 0.04;
+const LINK_PART = 46;
+const LINK_MENTION = 78;
+const LINK_REL = 120;
+const CENTER = 0.008;
+const DAMP = 0.82;
+const SETTLE_ITERS = 140;
 
 function linkLength(relation: string) {
   if (relation === "part_of") return LINK_PART;
@@ -44,106 +45,170 @@ function radius(n: Node, selected: boolean) {
   return selected ? scaled + 3 : scaled;
 }
 
+/** One physics step over the node set. Mutates node positions in place. */
+function tick(nodes: Node[], edges: Edge[], byId: Map<string, Node>) {
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i];
+      const b = nodes[j];
+      let dx = a.x - b.x;
+      let dy = a.y - b.y;
+      let d2 = dx * dx + dy * dy;
+      if (d2 < 0.01) {
+        dx = Math.random();
+        dy = Math.random();
+        d2 = 1;
+      }
+      const f = REPULSE / d2;
+      const d = Math.sqrt(d2);
+      const fx = (dx / d) * f;
+      const fy = (dy / d) * f;
+      a.vx += fx;
+      a.vy += fy;
+      b.vx -= fx;
+      b.vy -= fy;
+    }
+  }
+  for (const e of edges) {
+    const a = byId.get(e.a);
+    const b = byId.get(e.b);
+    if (!a || !b) continue;
+    const target = linkLength(e.relation);
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const diff = ((dist - target) / dist) * SPRING;
+    a.vx += dx * diff;
+    a.vy += dy * diff;
+    b.vx -= dx * diff;
+    b.vy -= dy * diff;
+  }
+  for (const n of nodes) {
+    if (n.pinned) {
+      n.vx = 0;
+      n.vy = 0;
+      continue;
+    }
+    n.vx += (W / 2 - n.x) * CENTER;
+    n.vy += (H / 2 - n.y) * CENTER;
+    n.vx *= DAMP;
+    n.vy *= DAMP;
+    n.x += n.vx;
+    n.y += n.vy;
+  }
+}
+
 export function MemoryGraph({ memories }: { memories: Memory[] }) {
   const [data, setData] = useState<GraphData | null>(null);
-  const [, setTick] = useState(0);
-  const [runId, setRunId] = useState(0);
-  const [selected, setSelected] = useState<string | null>(null);
   const [view, setView] = useState({ x: 0, y: 0, w: W, h: H });
+  const [selected, setSelected] = useState<string | null>(null);
   const dragId = useRef<string | null>(null);
   const pan = useRef<{ x: number; y: number } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const gRefs = useRef<Map<string, SVGGElement | null>>(new Map());
+  const lineRefs = useRef<(SVGLineElement | null)[]>([]);
+  const rafRef = useRef(0);
+  const coolRef = useRef(0);
 
   useEffect(() => {
     graphData().then(setData).catch(console.error);
   }, [memories.length]);
 
-  const { nodes, edges } = useMemo(() => {
-    const ns: Node[] = (data?.nodes ?? []).map((n) => ({
-      id: n.id,
-      kind: n.kind,
-      label: n.label,
-      isChunk: n.kind === "doc_chunk",
-      salience: n.salience,
-      x: W / 2 + (Math.random() - 0.5) * 320,
-      y: H / 2 + (Math.random() - 0.5) * 320,
-      vx: 0,
-      vy: 0,
-    }));
+  // Build nodes/edges and settle the layout ONCE (synchronously) so the graph
+  // appears already arranged instead of animating from chaos on every open.
+  const { nodes, edges, byId } = useMemo(() => {
+    const src = data?.nodes ?? [];
+    const n = src.length;
+    const ns: Node[] = src.map((node, i) => {
+      // Seed on a circle for a stable, fast-settling start.
+      const ang = (i / Math.max(1, n)) * Math.PI * 2;
+      const rad = 60 + (n > 0 ? (i % 7) * 26 : 0);
+      return {
+        id: node.id,
+        kind: node.kind,
+        label: node.label,
+        isChunk: node.kind === "doc_chunk",
+        salience: node.salience,
+        x: W / 2 + Math.cos(ang) * rad,
+        y: H / 2 + Math.sin(ang) * rad,
+        vx: 0,
+        vy: 0,
+      };
+    });
     const es: Edge[] = (data?.edges ?? []).map((e) => ({
       a: e.from,
       b: e.to,
       relation: e.relation,
     }));
-    return { nodes: ns, edges: es };
+    const map = new Map(ns.map((x) => [x.id, x]));
+    for (let k = 0; k < SETTLE_ITERS; k++) tick(ns, es, map);
+    return { nodes: ns, edges: es, byId: map };
   }, [data]);
 
   const nodesRef = useRef<Node[]>(nodes);
   nodesRef.current = nodes;
 
+  /** Write current node positions straight to the DOM (no React render). */
+  function paint() {
+    for (const n of nodesRef.current) {
+      const g = gRefs.current.get(n.id);
+      if (g) g.setAttribute("transform", `translate(${n.x},${n.y})`);
+    }
+    edges.forEach((e, i) => {
+      const line = lineRefs.current[i];
+      if (!line) return;
+      const a = byId.get(e.a);
+      const b = byId.get(e.b);
+      if (!a || !b) return;
+      line.setAttribute("x1", String(a.x));
+      line.setAttribute("y1", String(a.y));
+      line.setAttribute("x2", String(b.x));
+      line.setAttribute("y2", String(b.y));
+    });
+  }
+
+  /** Animation loop runs ONLY while dragging / cooling down. */
+  function animate() {
+    tick(nodesRef.current, edges, byId);
+    paint();
+    if (dragId.current || coolRef.current > 0) {
+      coolRef.current = Math.max(0, coolRef.current - 1);
+      rafRef.current = requestAnimationFrame(animate);
+    } else {
+      rafRef.current = 0;
+    }
+  }
+  function kick() {
+    coolRef.current = 40;
+    if (!rafRef.current) rafRef.current = requestAnimationFrame(animate);
+  }
+
+  useEffect(() => () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+  }, []);
+
+  // Scroll to zoom, anchored on the cursor.
   useEffect(() => {
-    let raf = 0;
-    let frames = 0;
-    const byId = new Map(nodesRef.current.map((n) => [n.id, n]));
-    const step = () => {
-      const ns = nodesRef.current;
-      for (let i = 0; i < ns.length; i++) {
-        for (let j = i + 1; j < ns.length; j++) {
-          const a = ns[i];
-          const b = ns[j];
-          let dx = a.x - b.x;
-          let dy = a.y - b.y;
-          let d2 = dx * dx + dy * dy;
-          if (d2 < 0.01) {
-            dx = Math.random();
-            dy = Math.random();
-            d2 = 1;
-          }
-          const f = REPULSE / d2;
-          const d = Math.sqrt(d2);
-          a.vx += (dx / d) * f;
-          a.vy += (dy / d) * f;
-          b.vx -= (dx / d) * f;
-          b.vy -= (dy / d) * f;
-        }
-      }
-      for (const e of edges) {
-        const a = byId.get(e.a);
-        const b = byId.get(e.b);
-        if (!a || !b) continue;
-        const target = linkLength(e.relation);
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const diff = ((dist - target) / dist) * SPRING;
-        a.vx += dx * diff;
-        a.vy += dy * diff;
-        b.vx -= dx * diff;
-        b.vy -= dy * diff;
-      }
-      let energy = 0;
-      for (const n of ns) {
-        if (n.pinned) {
-          n.vx = 0;
-          n.vy = 0;
-          continue;
-        }
-        n.vx += (W / 2 - n.x) * CENTER;
-        n.vy += (H / 2 - n.y) * CENTER;
-        n.vx *= DAMP;
-        n.vy *= DAMP;
-        n.x += n.vx;
-        n.y += n.vy;
-        energy += n.vx * n.vx + n.vy * n.vy;
-      }
-      setTick((t) => (t + 1) % 1000000);
-      frames++;
-      const settled = frames > 50 && energy < 0.4;
-      if (frames < 500 && !settled) raf = requestAnimationFrame(step);
+    const svg = svgRef.current;
+    if (!svg) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const p = toSvg(e.clientX, e.clientY);
+      setView((v) => {
+        const factor = e.deltaY > 0 ? 1.1 : 1 / 1.1;
+        const newW = Math.max(W * 0.15, Math.min(W * 3.5, v.w * factor));
+        const scale = newW / v.w;
+        return {
+          x: p.x - (p.x - v.x) * scale,
+          y: p.y - (p.y - v.y) * scale,
+          w: newW,
+          h: v.h * scale,
+        };
+      });
     };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [edges, runId]);
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+  }, [data]);
 
   function toSvg(clientX: number, clientY: number) {
     const svg = svgRef.current;
@@ -156,35 +221,6 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
     const p = pt.matrixTransform(ctm.inverse());
     return { x: p.x, y: p.y };
   }
-
-  // Scroll to zoom, anchored on the cursor (native non-passive listener so we
-  // can preventDefault the page scroll).
-  useEffect(() => {
-    const svg = svgRef.current;
-    if (!svg) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      const p = toSvg(e.clientX, e.clientY);
-      setView((v) => {
-        const factor = e.deltaY > 0 ? 1.1 : 1 / 1.1;
-        const minW = W * 0.15;
-        const maxW = W * 3.5;
-        const newW = Math.max(minW, Math.min(maxW, v.w * factor));
-        const scale = newW / v.w;
-        return {
-          x: p.x - (p.x - v.x) * scale,
-          y: p.y - (p.y - v.y) * scale,
-          w: newW,
-          h: v.h * scale,
-        };
-      });
-    };
-    svg.addEventListener("wheel", onWheel, { passive: false });
-    return () => svg.removeEventListener("wheel", onWheel);
-    // Re-run once `data` loads: the <svg> does not exist on the first mount
-    // (a placeholder renders until graph data arrives), so the listener must
-    // attach after the svg element appears.
-  }, [data]);
 
   function onMove(e: React.MouseEvent) {
     if (dragId.current) {
@@ -206,29 +242,24 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
   }
 
   function onBackgroundDown(e: React.MouseEvent) {
-    // Pan only when the empty background is grabbed, not a node.
-    if (e.target === svgRef.current) {
-      pan.current = { x: e.clientX, y: e.clientY };
-    }
+    if (e.target === svgRef.current) pan.current = { x: e.clientX, y: e.clientY };
   }
-
   function endInteract() {
-    dragId.current = null;
+    if (dragId.current) {
+      dragId.current = null;
+      kick(); // let neighbours settle briefly, then stop
+    }
     pan.current = null;
   }
 
-  const ns = nodesRef.current;
-  const byId = new Map(ns.map((n) => [n.id, n]));
   const sel = selected ? memories.find((m) => m.id === selected) : null;
 
-  if (!data) {
-    return <div className="graph-empty muted">Loading memory graph…</div>;
-  }
-  if (ns.length === 0) {
+  if (!data) return <div className="graph-empty muted">Loading memory graph…</div>;
+  if (nodes.length === 0) {
     return (
       <div className="graph-empty muted">
         No memories yet. Chat with Mint or drop a document in the Vault — the graph grows
-        as memories relate and documents branch into chunks.
+        as memories relate, entities connect them, and documents branch into chunks.
       </div>
     );
   }
@@ -253,6 +284,9 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
           return (
             <line
               key={i}
+              ref={(el) => {
+                lineRefs.current[i] = el;
+              }}
               x1={a.x}
               y1={a.y}
               x2={b.x}
@@ -261,16 +295,19 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
             />
           );
         })}
-        {ns.map((n) => (
+        {nodes.map((n) => (
           <g
             key={n.id}
+            ref={(el) => {
+              gRefs.current.set(n.id, el);
+            }}
             transform={`translate(${n.x},${n.y})`}
             className={`graph-node ${n.kind} ${selected === n.id ? "sel" : ""}`}
             onMouseDown={(e) => {
               e.preventDefault();
               dragId.current = n.id;
               setSelected(n.id);
-              setRunId((r) => r + 1);
+              kick();
             }}
           >
             <circle r={radius(n, selected === n.id)} />

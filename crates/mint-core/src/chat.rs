@@ -89,7 +89,7 @@ Return {\"memories\":[]} when there is nothing genuinely new to store.";
 /// memories. Only genuinely declarative statements should be captured; being
 /// strict here keeps meta-turns ("check my resume", "what are my strengths")
 /// from manufacturing junk notes that later pollute retrieval.
-fn is_query_only(msg: &str) -> bool {
+pub fn is_query_only(msg: &str) -> bool {
     let m = msg.trim();
     if m.is_empty() {
         return true;

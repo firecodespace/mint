@@ -1012,6 +1012,19 @@ ul {
   fill: #67e8f9;
   font-weight: 600;
 }
+.graph-node.topic circle {
+  fill: #fb7185;
+  stroke: #0b1014;
+  stroke-width: 2;
+}
+.graph-node.topic text {
+  fill: #fda4af;
+  font-weight: 700;
+}
+.pill.topic {
+  color: #fb7185;
+  border-color: rgba(251, 113, 133, 0.4);
+}
 .pill.document {
   color: #f0abfc;
   border-color: rgba(240, 171, 252, 0.4);
@@ -1036,10 +1049,16 @@ ul {
   stroke-width: 1.4;
 }
 .graph-edge.related {
-  stroke: #46a0a8;
-  stroke-width: 1;
-  stroke-opacity: 0.3;
+  stroke: #6fd3da;
+  stroke-width: 1.2;
+  stroke-opacity: 0.55;
   stroke-dasharray: 4 4;
+}
+.graph-edge.in_topic {
+  stroke: #e08fb0;
+  stroke-width: 1.3;
+  stroke-opacity: 0.5;
+  stroke-dasharray: 2 3;
 }
 .graph-legend {
   position: absolute;

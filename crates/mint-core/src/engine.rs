@@ -82,11 +82,16 @@ impl MemoryEngine {
     ///   <data_dir>/shard   -> Qdrant Edge shard (persisted memory)
     ///   <data_dir>/models  -> fastembed ONNX cache (downloaded once)
     pub fn open(data_dir: &Path) -> Result<Self> {
+        Self::open_with_models(data_dir, &data_dir.join("models"))
+    }
+
+    /// Open with an explicit embedding-model cache dir (lets tests/benchmarks use
+    /// a throwaway data dir without re-downloading the model).
+    pub fn open_with_models(data_dir: &Path, models_dir: &Path) -> Result<Self> {
         let shard_dir = data_dir.join("shard");
-        let models_dir = data_dir.join("models");
         std::fs::create_dir_all(&shard_dir).context("failed to create shard dir")?;
 
-        let embedders = Embedders::new(&models_dir)?;
+        let embedders = Embedders::new(models_dir)?;
         let shard = Self::open_shard(&shard_dir)?;
         let graph = GraphStore::open(data_dir)?;
         let meta = MetaStore::open(data_dir)?;
@@ -470,6 +475,18 @@ no explanation.";
         entity_model: &str,
     ) -> Result<(Memory, usize)> {
         let text = documents::parse(filename, bytes)?;
+        self.ingest_text(filename, &text, entity_model)
+    }
+
+    /// Chunk + store already-extracted text as a Document node with chunk
+    /// children. Shared by file ingestion and programmatic clients (API, CLI,
+    /// benchmarks).
+    pub fn ingest_text(
+        &self,
+        filename: &str,
+        text: &str,
+        entity_model: &str,
+    ) -> Result<(Memory, usize)> {
         if text.trim().is_empty() {
             return Err(anyhow!("no extractable text in '{filename}'"));
         }
@@ -491,9 +508,9 @@ no explanation.";
 
         // Route the document to a topic (schema layer), then file its chunks
         // under the same topic so a research effort stays coherent.
-        let doc_topic = self.route_and_assign(&doc.id, &text, entity_model);
+        let doc_topic = self.route_and_assign(&doc.id, text, entity_model);
 
-        let chunks = documents::chunk_text(&text);
+        let chunks = documents::chunk_text(text);
         let n = chunks.len();
         for (i, chunk) in chunks.into_iter().enumerate() {
             let stored = self.add(NewMemory {
@@ -516,7 +533,7 @@ no explanation.";
         }
         // Link the document to the entities it mentions (best-effort).
         if !entity_model.is_empty() {
-            let _ = self.attach_entities(&doc.id, &text, entity_model);
+            let _ = self.attach_entities(&doc.id, text, entity_model);
         }
         Ok((doc, n))
     }

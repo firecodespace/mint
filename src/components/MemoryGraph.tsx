@@ -40,7 +40,13 @@ function linkLength(relation: string) {
 function radius(n: Node, selected: boolean) {
   if (n.isChunk) return selected ? 6 : 3.5;
   const base =
-    n.kind === "document" ? 9 : n.kind === "entity" || n.kind === "summary" ? 8 : 6;
+    n.kind === "topic"
+      ? 11
+      : n.kind === "document"
+        ? 9
+        : n.kind === "entity" || n.kind === "summary"
+          ? 8
+          : 6;
   const scaled = base * (0.7 + 0.6 * (n.salience || 0.5));
   return selected ? scaled + 3 : scaled;
 }
@@ -135,16 +141,16 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
         vy: 0,
       };
     });
-    // All relationships: part_of (doc->chunk), mentions (->entity), and related
-    // (memory<->memory similarity). "related" renders faint so it shows the web
-    // without dominating.
+    // All relationships: part_of (doc->chunk), mentions (->entity), in_topic
+    // (->topic), and related (memory<->memory similarity). "related" renders
+    // faint so it shows the web without dominating.
     const es: Edge[] = (data?.edges ?? []).map((e) => ({
       a: e.from,
       b: e.to,
       relation: e.relation,
     }));
-    // The layout is driven ONLY by structure (part_of + mentions) so it stays
-    // stable; "related" edges are drawn but do not pull nodes around.
+    // The layout is driven ONLY by structure (part_of / mentions / in_topic) so
+    // it stays stable; "related" edges are drawn but do not pull nodes around.
     const layoutEdges = es.filter((e) => e.relation !== "related");
     const map = new Map(ns.map((x) => [x.id, x]));
     for (let k = 0; k < SETTLE_ITERS; k++) tick(ns, layoutEdges, map);

@@ -472,17 +472,24 @@ impl MemoryEngine {
             }
         }
 
-        // Push (embed + upsert to server, then mark local synced).
+        // Push: mark synced first so both the server payload and the local copy
+        // agree on sync_state, then upsert to server and to the local shard.
         if !to_push.is_empty() {
-            let points: Vec<ServerPoint> = to_push
+            let synced: Vec<Memory> = to_push
+                .iter()
+                .map(|m| {
+                    let mut mm = m.clone();
+                    mm.sync_state = SyncState::Synced;
+                    mm
+                })
+                .collect();
+            let points: Vec<ServerPoint> = synced
                 .iter()
                 .filter_map(|m| self.to_server_point(m).ok())
                 .collect();
             client.upsert(&points)?;
-            for m in &to_push {
-                let mut mm = m.clone();
-                mm.sync_state = SyncState::Synced;
-                if self.upsert(&mm).is_ok() {
+            for mm in &synced {
+                if self.upsert(mm).is_ok() {
                     report.pushed += 1;
                 }
             }

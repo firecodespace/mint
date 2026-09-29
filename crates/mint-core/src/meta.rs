@@ -17,6 +17,12 @@ struct MetaData {
     /// entity id -> its consolidated summary memory id.
     #[serde(default)]
     summaries: HashMap<String, String>,
+    /// memory id -> how many times it has been retrieved (feeds salience).
+    #[serde(default)]
+    access: HashMap<String, u32>,
+    /// deleted memory id -> RFC3339 deletion time (for delete propagation).
+    #[serde(default)]
+    tombstones: HashMap<String, String>,
 }
 
 pub struct MetaStore {
@@ -76,5 +82,33 @@ impl MetaStore {
     pub fn retain_existing(&mut self, existing: &HashSet<String>) -> Result<()> {
         self.data.archived.retain(|id| existing.contains(id));
         self.save()
+    }
+
+    // ---- access counts ----
+    pub fn access_count(&self, id: &str) -> u32 {
+        self.data.access.get(id).copied().unwrap_or(0)
+    }
+    pub fn access_snapshot(&self) -> HashMap<String, u32> {
+        self.data.access.clone()
+    }
+    pub fn bump_access(&mut self, ids: &[String]) -> Result<()> {
+        for id in ids {
+            *self.data.access.entry(id.clone()).or_insert(0) += 1;
+        }
+        self.save()
+    }
+
+    // ---- tombstones (delete propagation) ----
+    pub fn add_tombstone(&mut self, id: &str, ts: &str) -> Result<()> {
+        self.data.tombstones.insert(id.to_string(), ts.to_string());
+        self.data.archived.remove(id);
+        self.data.access.remove(id);
+        self.save()
+    }
+    pub fn is_tombstoned(&self, id: &str) -> bool {
+        self.data.tombstones.contains_key(id)
+    }
+    pub fn tombstones(&self) -> &HashMap<String, String> {
+        &self.data.tombstones
     }
 }

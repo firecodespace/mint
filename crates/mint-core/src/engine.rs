@@ -10,10 +10,10 @@ use anyhow::{anyhow, Context, Result};
 use qdrant_edge::{
     Condition, CreateIndex, Distance, EdgeConfigBuilder, EdgeShard, EdgeSparseVectorParamsBuilder,
     EdgeVectorParamsBuilder, FieldCondition, FieldIndexOperations, Filter, Fusion, JsonPath, Match,
-    Modifier, NamedQuery, Payload, PayloadFieldSchema, PayloadSchemaType, PointId, PointOperations,
-    PointInsertOperations, PointStruct, PointStructPersisted, PrefetchBuilder, QueryEnum,
-    QueryRequestBuilder, ScoringQuery, ScrollRequestBuilder, UpdateOperation, Vector, VectorInternal,
-    Vectors, WithPayloadInterface,
+    Modifier, NamedQuery, Payload, PayloadFieldSchema, PayloadOps, PayloadSchemaType, PointId,
+    PointInsertOperations, PointOperations, PointStruct, PointStructPersisted, PrefetchBuilder,
+    QueryEnum, QueryRequestBuilder, ScoringQuery, ScrollRequestBuilder, SetPayloadOp,
+    UpdateOperation, Vector, VectorInternal, Vectors, WithPayloadInterface,
 };
 
 use super::embed::{Embedders, DENSE_DIM};
@@ -318,6 +318,34 @@ impl MemoryEngine {
         Ok(())
     }
 
+    /// Merge payload fields on a point WITHOUT re-embedding (metadata updates).
+    fn set_payload_fields(&self, id: &str, fields: serde_json::Value) -> Result<()> {
+        let pid = point_id(id)?;
+        let payload: Payload =
+            serde_json::from_value(fields).context("invalid payload fields")?;
+        self.shard
+            .update(UpdateOperation::PayloadOperation(PayloadOps::SetPayload(
+                SetPayloadOp {
+                    payload,
+                    points: Some(vec![pid]),
+                    filter: None,
+                    key: None,
+                },
+            )))
+            .map_err(|e| anyhow!("set payload failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Record that these memories were retrieved (feeds salience).
+    pub fn bump_access(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        if let Ok(mut meta) = self.meta.lock() {
+            let _ = meta.bump_access(ids);
+        }
+    }
+
     pub fn delete(&self, id: &str) -> Result<()> {
         let pid = point_id(id)?;
         self.shard
@@ -330,6 +358,10 @@ impl MemoryEngine {
             .map_err(|e| anyhow!("flush failed: {e}"))?;
         if let Ok(mut g) = self.graph.lock() {
             let _ = g.remove_node(id);
+        }
+        // Record a tombstone so the deletion propagates on the next sync.
+        if let Ok(mut meta) = self.meta.lock() {
+            let _ = meta.add_tombstone(id, &chrono::Utc::now().to_rfc3339());
         }
         Ok(())
     }
@@ -729,16 +761,12 @@ impl MemoryEngine {
         Ok(items)
     }
 
-    /// Mark a scheduled item done / not-done.
+    /// Mark a scheduled item done / not-done (payload-only, no re-embed).
     pub fn set_done(&self, id: &str, done: bool) -> Result<()> {
-        let mut mem = self
-            .list()?
-            .into_iter()
-            .find(|m| m.id == id)
-            .ok_or_else(|| anyhow!("memory not found"))?;
-        mem.done = done;
-        mem.updated_at = chrono::Utc::now().to_rfc3339();
-        self.upsert(&mem)?;
+        self.set_payload_fields(
+            id,
+            serde_json::json!({ "done": done, "updated_at": chrono::Utc::now().to_rfc3339() }),
+        )?;
         self.shard.flush().map_err(|e| anyhow!("flush failed: {e}"))?;
         Ok(())
     }
@@ -783,24 +811,52 @@ impl MemoryEngine {
             .query(builder.build())
             .map_err(|e| anyhow!("query failed: {e}"))?;
 
-        let archived = self
+        let (archived, tombstoned, access) = self
             .meta
             .lock()
-            .map(|m| m.archived_ids().clone())
+            .map(|m| {
+                (
+                    m.archived_ids().clone(),
+                    m.tombstones()
+                        .keys()
+                        .cloned()
+                        .collect::<std::collections::HashSet<_>>(),
+                    m.access_snapshot(),
+                )
+            })
             .unwrap_or_default();
-        let results: Vec<SearchResult> = scored
+        let deg = self.degrees();
+        let mut results: Vec<SearchResult> = scored
             .into_iter()
             .filter_map(|sp| {
-                let memory = memory_from_payload(sp.payload.as_ref())?;
-                if archived.contains(&memory.id) {
+                let mut memory = memory_from_payload(sp.payload.as_ref())?;
+                if archived.contains(&memory.id) || tombstoned.contains(&memory.id) {
                     return None;
                 }
+                memory.salience = salience_of(
+                    &memory,
+                    deg.get(&memory.id).copied().unwrap_or(0),
+                    access.get(&memory.id).copied().unwrap_or(0),
+                );
                 Some(SearchResult {
                     memory,
                     score: sp.score,
                 })
             })
             .collect();
+
+        // Salience-weighted rerank: relevance dominates, importance breaks ties
+        // and nudges genuinely useful memories up.
+        if results.len() > 1 {
+            let max = results.iter().map(|r| r.score).fold(f32::MIN, f32::max);
+            let min = results.iter().map(|r| r.score).fold(f32::MAX, f32::min);
+            let range = (max - min).max(1e-6);
+            results.sort_by(|a, b| {
+                let ba = 0.75 * ((a.score - min) / range) + 0.25 * a.memory.salience;
+                let bb = 0.75 * ((b.score - min) / range) + 0.25 * b.memory.salience;
+                bb.partial_cmp(&ba).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
 
         Ok(SearchResponse {
             results,
@@ -827,15 +883,30 @@ impl MemoryEngine {
 
         // Overlay engine-computed state (archived flag + salience) that lives
         // outside the vector payload so it never triggers re-embedding.
-        let archived = self
+        let (archived, tombstoned, access) = self
             .meta
             .lock()
-            .map(|m| m.archived_ids().clone())
+            .map(|m| {
+                (
+                    m.archived_ids().clone(),
+                    m.tombstones()
+                        .keys()
+                        .cloned()
+                        .collect::<std::collections::HashSet<_>>(),
+                    m.access_snapshot(),
+                )
+            })
             .unwrap_or_default();
+        // A tombstoned id should never surface (defensive).
+        memories.retain(|m| !tombstoned.contains(&m.id));
         let deg = self.degrees();
         for m in &mut memories {
             m.archived = archived.contains(&m.id);
-            m.salience = salience_of(m, deg.get(&m.id).copied().unwrap_or(0));
+            m.salience = salience_of(
+                m,
+                deg.get(&m.id).copied().unwrap_or(0),
+                access.get(&m.id).copied().unwrap_or(0),
+            );
         }
 
         // Newest first by ULID (lexicographically sortable, time-ordered).
@@ -899,10 +970,11 @@ fn age_days(ts: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Salience in [0,1]: recency + graph connectivity + kind weight.
-fn salience_of(m: &Memory, degree: usize) -> f32 {
+/// Salience in [0,1]: recency + graph connectivity + usage + kind weight.
+fn salience_of(m: &Memory, degree: usize, access: u32) -> f32 {
     let recency = (1.0 / (1.0 + age_days(&m.updated_at) / 30.0)) as f32;
     let deg = (degree as f32 / 4.0).min(1.0);
+    let used = (access as f32 / 5.0).min(1.0);
     let kindw = match m.kind {
         MemoryKind::Note
         | MemoryKind::Observation
@@ -913,7 +985,7 @@ fn salience_of(m: &Memory, degree: usize) -> f32 {
         MemoryKind::Document => 0.85,
         MemoryKind::DocChunk => 0.5,
     };
-    0.5 * recency + 0.3 * deg + 0.2 * kindw
+    0.42 * recency + 0.25 * deg + 0.18 * used + 0.15 * kindw
 }
 
 /// Deterministic Qdrant point id from a ULID string (UUID over the 16 ULID bytes).

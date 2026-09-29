@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import "./App.css";
-import { chatStatus, getStats, listMemories } from "./api";
-import type { ChatStatus, Memory, Stats } from "./types";
+import { chatStatus, getStats, listMemories, runMaintenance } from "./api";
+import type { ChatStatus, MaintenanceReport, Memory, Stats } from "./types";
 import { Chat } from "./components/Chat";
 import { Capture } from "./components/Capture";
 import { Search } from "./components/Search";
@@ -21,6 +21,21 @@ function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
   const [booting, setBooting] = useState(true);
+  const [maintBusy, setMaintBusy] = useState(false);
+  const [maintReport, setMaintReport] = useState<MaintenanceReport | null>(null);
+
+  async function runMaint() {
+    setMaintBusy(true);
+    try {
+      const r = await runMaintenance();
+      setMaintReport(r);
+      await refresh();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setMaintBusy(false);
+    }
+  }
 
   const refresh = useCallback(async () => {
     const [s, m] = await Promise.all([getStats(), listMemories()]);
@@ -113,7 +128,17 @@ function App() {
                 List
               </button>
             </div>
-            <span className="muted">{memories.length} memories on this device</span>
+            <span className="muted">{memories.length} active memories</span>
+            <div className="maint">
+              {maintReport && (
+                <span className="muted maint-report">
+                  {maintReport.summaries} summaries · {maintReport.archived} archived
+                </span>
+              )}
+              <button className="ghost" onClick={runMaint} disabled={maintBusy}>
+                {maintBusy ? "Consolidating…" : "Consolidate & tidy"}
+              </button>
+            </div>
           </div>
           {memView === "graph" ? (
             <MemoryGraph memories={memories} />

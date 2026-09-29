@@ -8,6 +8,7 @@ import type {
   ConversationSummary,
   DocIngestResult,
   GraphData,
+  MaintenanceReport,
   Memory,
   NewMemory,
   SearchRequest,
@@ -107,4 +108,14 @@ export function setServerUrl(url: string): Promise<void> {
 
 export function syncNow(): Promise<SyncReport> {
   return invoke<SyncReport>("sync_now");
+}
+
+// ---- maintenance ---------------------------------------------------------
+
+export function runMaintenance(): Promise<MaintenanceReport> {
+  return invoke<MaintenanceReport>("run_maintenance");
+}
+
+export function clearArchive(): Promise<number> {
+  return invoke<number>("clear_archive");
 }

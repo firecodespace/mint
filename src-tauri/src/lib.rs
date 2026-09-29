@@ -78,6 +78,8 @@ pub fn run() {
             commands::set_online,
             commands::set_server_url,
             commands::sync_now,
+            commands::run_maintenance,
+            commands::clear_archive,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

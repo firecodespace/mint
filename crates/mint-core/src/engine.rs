@@ -18,6 +18,7 @@ use qdrant_edge::{
 
 use super::embed::{Embedders, DENSE_DIM};
 use super::graph::{GraphData, GraphNode, GraphStore};
+use super::meta::MetaStore;
 use super::ollama::Ollama;
 use super::record::{
     Memory, MemoryKind, MemorySource, NewMemory, SearchMode, SearchRequest, SearchResponse,
@@ -36,6 +37,20 @@ pub struct SyncCounts {
     pub local_only: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct MaintenanceReport {
+    pub summaries: usize,
+    pub archived: usize,
+    pub active: usize,
+}
+
+/// Decay thresholds.
+const DECAY_SALIENCE: f32 = 0.30;
+const DECAY_MIN_AGE_DAYS: f64 = 14.0;
+/// Consolidation: minimum memories mentioning an entity to summarize it, and cap.
+const CONSOLIDATE_MIN: usize = 3;
+const CONSOLIDATE_MAX_ENTITIES: usize = 12;
+
 /// Similarity above which two memories get a "related" edge in the graph.
 const RELATED_THRESHOLD: f32 = 0.55;
 /// Max related edges recorded per memory.
@@ -53,6 +68,7 @@ pub struct MemoryEngine {
     shard: EdgeShard,
     embedders: Embedders,
     graph: Mutex<GraphStore>,
+    meta: Mutex<MetaStore>,
     ollama: Ollama,
     /// normalized entity name -> entity memory id (dedup).
     entity_index: Mutex<HashMap<String, String>>,
@@ -70,11 +86,13 @@ impl MemoryEngine {
         let embedders = Embedders::new(&models_dir)?;
         let shard = Self::open_shard(&shard_dir)?;
         let graph = GraphStore::open(data_dir)?;
+        let meta = MetaStore::open(data_dir)?;
 
         let engine = Self {
             shard,
             embedders,
             graph: Mutex::new(graph),
+            meta: Mutex::new(meta),
             ollama: Ollama::new(),
             entity_index: Mutex::new(HashMap::new()),
         };
@@ -172,6 +190,7 @@ impl MemoryEngine {
             sync_state,
             version: 1,
             parent_id: input.parent_id,
+            archived: false,
         };
         self.upsert(&memory)?;
         self.shard
@@ -510,8 +529,14 @@ impl MemoryEngine {
 
     pub fn graph_data(&self) -> Result<GraphData> {
         let memories = self.list()?;
+        let active: std::collections::HashSet<String> = memories
+            .iter()
+            .filter(|m| !m.archived)
+            .map(|m| m.id.clone())
+            .collect();
         let nodes: Vec<GraphNode> = memories
             .iter()
+            .filter(|m| !m.archived)
             .map(|m| GraphNode {
                 id: m.id.clone(),
                 label: if m.title.trim().is_empty() {
@@ -521,14 +546,168 @@ impl MemoryEngine {
                 },
                 kind: kind_str(&m.kind),
                 parent_id: m.parent_id.clone(),
+                salience: m.salience,
             })
             .collect();
         let edges = self
             .graph
             .lock()
             .map(|g| g.all().to_vec())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| active.contains(&e.from) && active.contains(&e.to))
+            .collect();
         Ok(GraphData { nodes, edges })
+    }
+
+    // ---- consolidation, decay, maintenance ------------------------------
+
+    /// Distill what is known about well-connected entities into summary nodes.
+    pub fn consolidate(&self, model: &str) -> Result<usize> {
+        let edges = self
+            .graph
+            .lock()
+            .map(|g| g.all().to_vec())
+            .unwrap_or_default();
+
+        // entity id -> memories that mention it.
+        let mut ent_mems: HashMap<String, Vec<String>> = HashMap::new();
+        for e in &edges {
+            if e.relation == "mentions" {
+                ent_mems.entry(e.to.clone()).or_default().push(e.from.clone());
+            }
+        }
+
+        let all = self.list()?;
+        let by_id: HashMap<String, Memory> =
+            all.iter().map(|m| (m.id.clone(), m.clone())).collect();
+
+        let mut ents: Vec<(String, Vec<String>)> = ent_mems
+            .into_iter()
+            .filter(|(_, v)| v.len() >= CONSOLIDATE_MIN)
+            .collect();
+        ents.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        ents.truncate(CONSOLIDATE_MAX_ENTITIES);
+
+        let mut count = 0;
+        for (ent_id, mem_ids) in ents {
+            let ent = match by_id.get(&ent_id) {
+                Some(e) => e,
+                None => continue,
+            };
+            let mut notes = String::new();
+            for mid in &mem_ids {
+                if let Some(m) = by_id.get(mid) {
+                    if m.kind == MemoryKind::Summary {
+                        continue;
+                    }
+                    notes.push_str("- ");
+                    notes.push_str(&truncate(&m.text, 300));
+                    notes.push('\n');
+                }
+            }
+            if notes.trim().is_empty() {
+                continue;
+            }
+            let prompt = format!(
+                "Entity: {}\nNotes mentioning it:\n{}\nWrite a concise factual summary \
+(3-5 sentences) of what is known about \"{}\" from these notes only.",
+                ent.title, notes, ent.title
+            );
+            let summary = match self.ollama.generate(
+                model,
+                Some("You write concise factual entity summaries for a knowledge base."),
+                &prompt,
+                false,
+            ) {
+                Ok(s) if !s.trim().is_empty() => s,
+                _ => continue,
+            };
+
+            let existing = self.meta.lock().ok().and_then(|m| m.summary_for(&ent_id));
+            let title = format!("{} — summary", ent.title);
+            let summary_id = if let Some(sid) = existing.filter(|sid| by_id.contains_key(sid)) {
+                // Update the existing summary node in place.
+                let mut updated = by_id.get(&sid).unwrap().clone();
+                updated.text = summary;
+                updated.title = title;
+                updated.updated_at = chrono::Utc::now().to_rfc3339();
+                let _ = self.upsert(&updated);
+                sid
+            } else {
+                let s = self.add(NewMemory {
+                    kind: MemoryKind::Summary,
+                    title,
+                    text: summary,
+                    site_id: String::new(),
+                    asset_id: String::new(),
+                    geo: None,
+                    tags: vec![ent.title.clone(), "summary".to_string()],
+                    source: MemorySource::Manual,
+                    sensitivity: Sensitivity::Shareable,
+                    parent_id: None,
+                })?;
+                let _ = self
+                    .meta
+                    .lock()
+                    .map(|mut m| m.set_summary(&ent_id, &s.id));
+                s.id
+            };
+            // Attach the summary to its entity hub.
+            if let Ok(mut g) = self.graph.lock() {
+                let _ = g.set_mentions(&summary_id, &[ent_id.clone()]);
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Archive old, low-salience document chunks (kept, excluded from retrieval).
+    pub fn decay(&self) -> Result<usize> {
+        let all = self.list()?;
+        let mut newly = 0;
+        for m in &all {
+            if m.archived || m.kind != MemoryKind::DocChunk {
+                continue;
+            }
+            if m.salience < DECAY_SALIENCE && age_days(&m.updated_at) > DECAY_MIN_AGE_DAYS {
+                if let Ok(mut meta) = self.meta.lock() {
+                    if meta.archive(&m.id).is_ok() {
+                        newly += 1;
+                    }
+                }
+            }
+        }
+        Ok(newly)
+    }
+
+    /// Full maintenance pass: consolidate + decay + prune stale archive entries.
+    pub fn run_maintenance(&self, model: &str) -> Result<MaintenanceReport> {
+        let summaries = self.consolidate(model)?;
+        let _ = self.decay()?;
+        let existing: std::collections::HashSet<String> =
+            self.list()?.iter().map(|m| m.id.clone()).collect();
+        if let Ok(mut meta) = self.meta.lock() {
+            let _ = meta.retain_existing(&existing);
+        }
+        let archived = self
+            .meta
+            .lock()
+            .map(|m| m.archived_ids().len())
+            .unwrap_or(0);
+        let active = self.list_active()?.len();
+        Ok(MaintenanceReport {
+            summaries,
+            archived,
+            active,
+        })
+    }
+
+    pub fn clear_archive(&self) -> Result<usize> {
+        self.meta
+            .lock()
+            .map_err(|_| anyhow!("meta poisoned"))?
+            .clear_archive()
     }
 
     // ---- retrieval -------------------------------------------------------
@@ -571,10 +750,18 @@ impl MemoryEngine {
             .query(builder.build())
             .map_err(|e| anyhow!("query failed: {e}"))?;
 
+        let archived = self
+            .meta
+            .lock()
+            .map(|m| m.archived_ids().clone())
+            .unwrap_or_default();
         let results: Vec<SearchResult> = scored
             .into_iter()
             .filter_map(|sp| {
                 let memory = memory_from_payload(sp.payload.as_ref())?;
+                if archived.contains(&memory.id) {
+                    return None;
+                }
                 Some(SearchResult {
                     memory,
                     score: sp.score,
@@ -604,9 +791,40 @@ impl MemoryEngine {
             .into_iter()
             .filter_map(|r| memory_from_payload(r.payload.as_ref()))
             .collect();
+
+        // Overlay engine-computed state (archived flag + salience) that lives
+        // outside the vector payload so it never triggers re-embedding.
+        let archived = self
+            .meta
+            .lock()
+            .map(|m| m.archived_ids().clone())
+            .unwrap_or_default();
+        let deg = self.degrees();
+        for m in &mut memories {
+            m.archived = archived.contains(&m.id);
+            m.salience = salience_of(m, deg.get(&m.id).copied().unwrap_or(0));
+        }
+
         // Newest first by ULID (lexicographically sortable, time-ordered).
         memories.sort_by(|a, b| b.id.cmp(&a.id));
         Ok(memories)
+    }
+
+    /// All non-archived memories.
+    pub fn list_active(&self) -> Result<Vec<Memory>> {
+        Ok(self.list()?.into_iter().filter(|m| !m.archived).collect())
+    }
+
+    /// Connectivity degree per node id (edges touching it).
+    fn degrees(&self) -> HashMap<String, usize> {
+        let mut d = HashMap::new();
+        if let Ok(g) = self.graph.lock() {
+            for e in g.all() {
+                *d.entry(e.from.clone()).or_insert(0) += 1;
+                *d.entry(e.to.clone()).or_insert(0) += 1;
+            }
+        }
+        d
     }
 
     pub fn stats(&self) -> Result<Stats> {
@@ -628,6 +846,41 @@ impl MemoryEngine {
 /// Build a JsonPath for a payload field (our field names are simple identifiers).
 fn jpath(field: &str) -> JsonPath {
     field.parse().expect("valid payload field path")
+}
+
+/// Truncate to at most `max` characters (char-safe).
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect::<String>() + "..."
+    }
+}
+
+/// Age of an RFC3339 timestamp in days.
+fn age_days(ts: &str) -> f64 {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|t| {
+            (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() as f64 / 86400.0
+        })
+        .unwrap_or(0.0)
+}
+
+/// Salience in [0,1]: recency + graph connectivity + kind weight.
+fn salience_of(m: &Memory, degree: usize) -> f32 {
+    let recency = (1.0 / (1.0 + age_days(&m.updated_at) / 30.0)) as f32;
+    let deg = (degree as f32 / 4.0).min(1.0);
+    let kindw = match m.kind {
+        MemoryKind::Note
+        | MemoryKind::Observation
+        | MemoryKind::Event
+        | MemoryKind::Measurement
+        | MemoryKind::Summary => 1.0,
+        MemoryKind::Entity => 0.9,
+        MemoryKind::Document => 0.85,
+        MemoryKind::DocChunk => 0.5,
+    };
+    0.5 * recency + 0.3 * deg + 0.2 * kindw
 }
 
 /// Deterministic Qdrant point id from a ULID string (UUID over the 16 ULID bytes).

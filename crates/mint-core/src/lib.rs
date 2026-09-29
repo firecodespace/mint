@@ -10,6 +10,7 @@ pub mod embed;
 pub mod engine;
 pub mod entities;
 pub mod graph;
+pub mod meta;
 pub mod ollama;
 pub mod record;
 pub mod sync;

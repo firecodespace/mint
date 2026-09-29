@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, State};
 use base64::Engine as _;
 use mint_core::chat::{extract_memories, format_context, system_prompt};
 use mint_core::conversations::{Conversation, ConversationStore, ConversationSummary};
-use mint_core::engine::SyncCounts;
+use mint_core::engine::{MaintenanceReport, SyncCounts};
 use mint_core::graph::GraphData;
 use mint_core::ollama::{ChatMessage, Delta, Ollama};
 use mint_core::record::{
@@ -89,7 +89,9 @@ pub fn search_memories(
 
 #[tauri::command]
 pub fn list_memories(state: State<AppState>) -> Result<Vec<Memory>, String> {
-    lock_engine(&state.engine)?.list().map_err(|e| e.to_string())
+    lock_engine(&state.engine)?
+        .list_active()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -105,6 +107,28 @@ pub fn stats(state: State<AppState>) -> Result<Stats, String> {
 #[tauri::command]
 pub fn graph_data(state: State<AppState>) -> Result<GraphData, String> {
     lock_engine(&state.engine)?.graph_data().map_err(|e| e.to_string())
+}
+
+// ---- maintenance (consolidation + decay) ---------------------------------
+
+/// Run consolidation (entity summaries) + decay (archive stale chunks).
+#[tauri::command]
+pub async fn run_maintenance(state: State<'_, AppState>) -> Result<MaintenanceReport, String> {
+    let engine = state.engine.clone();
+    let model = state.fast_model.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let eng = engine.lock().map_err(|_| "engine poisoned".to_string())?;
+        eng.run_maintenance(&model).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("maintenance task failed: {e}"))?
+}
+
+#[tauri::command]
+pub fn clear_archive(state: State<AppState>) -> Result<usize, String> {
+    lock_engine(&state.engine)?
+        .clear_archive()
+        .map_err(|e| e.to_string())
 }
 
 // ---- vault (documents) ---------------------------------------------------

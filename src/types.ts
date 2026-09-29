@@ -8,7 +8,8 @@ export type MemoryKind =
   | "measurement"
   | "event"
   | "document"
-  | "entity";
+  | "entity"
+  | "summary";
 
 export type MemorySource = "manual" | "file" | "sensor";
 
@@ -39,6 +40,7 @@ export interface Memory {
   sync_state: SyncState;
   version: number;
   parent_id: string | null;
+  archived: boolean;
 }
 
 // Input for creating a memory (engine fills id/timestamps/engine-managed fields).
@@ -155,6 +157,13 @@ export interface GraphNode {
   label: string;
   kind: string;
   parent_id: string | null;
+  salience: number;
+}
+
+export interface MaintenanceReport {
+  summaries: number;
+  archived: number;
+  active: number;
 }
 
 export interface GraphEdge {

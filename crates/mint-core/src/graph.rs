@@ -22,6 +22,7 @@ pub struct GraphNode {
     pub label: String,
     pub kind: String,
     pub parent_id: Option<String>,
+    pub salience: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]

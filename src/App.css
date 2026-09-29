@@ -749,6 +749,15 @@ ul {
   align-items: center;
   gap: 12px;
 }
+.maint {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.maint-report {
+  font-size: 12px;
+}
 .memory-view {
   flex: 1;
   display: grid;
@@ -967,6 +976,15 @@ ul {
   fill: #fcd34d;
   font-weight: 600;
 }
+.graph-node.summary circle {
+  fill: #22d3ee;
+  stroke: #0b1014;
+  stroke-width: 2;
+}
+.graph-node.summary text {
+  fill: #67e8f9;
+  font-weight: 600;
+}
 .pill.document {
   color: #f0abfc;
   border-color: rgba(240, 171, 252, 0.4);
@@ -974,6 +992,13 @@ ul {
 .pill.entity {
   color: #fbbf24;
   border-color: rgba(251, 191, 36, 0.4);
+}
+.pill.summary {
+  color: #22d3ee;
+  border-color: rgba(34, 211, 238, 0.4);
+}
+.lg.summary {
+  background: #22d3ee;
 }
 .graph-edge.part_of {
   stroke: rgba(240, 171, 252, 0.45);

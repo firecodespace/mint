@@ -16,6 +16,8 @@ pub enum MemoryKind {
     Document,
     /// A named entity (person/org/place/concept) that connects memories.
     Entity,
+    /// A consolidated summary distilled from several related memories.
+    Summary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -92,6 +94,10 @@ pub struct Memory {
     /// For document chunks: the id of their parent Document node.
     #[serde(default)]
     pub parent_id: Option<String>,
+
+    /// Archived by decay: kept on disk but excluded from retrieval and the graph.
+    #[serde(default)]
+    pub archived: bool,
 }
 
 /// Input for creating a memory. The engine fills id / timestamps / the

@@ -7,6 +7,7 @@ interface Node {
   kind: string;
   label: string;
   isChunk: boolean;
+  salience: number;
   x: number;
   y: number;
   vx: number;
@@ -36,11 +37,11 @@ function linkLength(relation: string) {
 }
 
 function radius(n: Node, selected: boolean) {
-  if (selected) return n.kind === "document" || n.kind === "entity" ? 11 : 9;
-  if (n.kind === "document") return 9;
-  if (n.kind === "entity") return 8;
-  if (n.isChunk) return 3.5;
-  return 6;
+  if (n.isChunk) return selected ? 6 : 3.5;
+  const base =
+    n.kind === "document" ? 9 : n.kind === "entity" || n.kind === "summary" ? 8 : 6;
+  const scaled = base * (0.7 + 0.6 * (n.salience || 0.5));
+  return selected ? scaled + 3 : scaled;
 }
 
 export function MemoryGraph({ memories }: { memories: Memory[] }) {
@@ -63,6 +64,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
       kind: n.kind,
       label: n.label,
       isChunk: n.kind === "doc_chunk",
+      salience: n.salience,
       x: W / 2 + (Math.random() - 0.5) * 320,
       y: H / 2 + (Math.random() - 0.5) * 320,
       vx: 0,
@@ -284,6 +286,7 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
       <div className="graph-legend">
         <span><i className="lg document" /> document</span>
         <span><i className="lg entity" /> entity</span>
+        <span><i className="lg summary" /> summary</span>
         <span><i className="lg note" /> memory</span>
         <span><i className="lg chunk" /> chunk</span>
         <span><i className="lg e-part" /> part of</span>

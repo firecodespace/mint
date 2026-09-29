@@ -159,3 +159,9 @@ Salience routing keeps the store signal-rich.
   project-local `D:\mint\.mint-data` via `MINT_DATA_DIR`.
 - 2026-09-29: Platform vision locked (see section 0). Next: Phase 2 — start with the
   `mint-core` refactor + localhost API, then Ollama chat with live memory capture.
+- 2026-09-30: Topic (schema) layer: kNN + entity-aware routing, Profile topic,
+  consolidation (re-homing), rolling LLM summaries, topic-aware retrieval with
+  weighted RRF, rename/merge/move/organize from the graph. Labeled benchmark harness
+  and integration tests added; chat retrieval MRR 0.660 -> 1.000, topic F1 0.733 ->
+  0.944. Batched ingestion (3x per-chunk), indexed lookups, optimized dev deps.
+  Still open: localhost API, CLI/git hooks, secrets vault, procedural memory, images.

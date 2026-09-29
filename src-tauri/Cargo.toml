@@ -23,6 +23,13 @@ log = "0.4.34"
 base64 = "0.22"
 mint-core = { path = "../crates/mint-core" }
 
+# Dev builds: optimize every dependency (Qdrant Edge, ONNX Runtime bindings,
+# BM25, PDF parsing, and mint-core itself) so retrieval and ingestion run near
+# release speed during `npm run tauri dev`. Only the app crate stays unoptimized,
+# so its incremental rebuilds remain fast. First build after this is slower.
+[profile.dev.package."*"]
+opt-level = 3
+
 # Release optimization (see https://tauri.app/concept/size/#cargo-configuration).
 [profile.release]
 codegen-units = 1

@@ -2211,10 +2211,9 @@ fn is_profile_title(title: &str) -> bool {
         "resume", "resumé", "résumé", "curriculum vitae", "curriculum-vitae", "about me",
         "about-me", "aboutme", "biodata",
     ];
-    HINTS.iter().any(|h| t.contains(h))
-        || t
-            .split(|c: char| !c.is_alphanumeric())
-            .any(|w| w == "cv" || w == "bio" || w == "profile")
+    // "bio" / "profile" alone are ambiguous ("Bio 101 notes", "Company Profile"),
+    // so only unambiguous identity markers count.
+    HINTS.iter().any(|h| t.contains(h)) || t.split(|c: char| !c.is_alphanumeric()).any(|w| w == "cv")
 }
 
 /// Should the user's profile ground this answer? Only for questions about the
@@ -2545,6 +2544,17 @@ mod tests {
             "Hierarchical Cognitive Memory Architecture"
         );
         assert_eq!(clean_label("Memory Architecture for"), "Memory Architecture");
+    }
+
+    #[test]
+    fn profile_titles_are_unambiguous() {
+        use super::is_profile_title;
+        assert!(is_profile_title("Resume (Aug 2026) (1).pdf"));
+        assert!(is_profile_title("Yash_CV_2026.pdf"));
+        assert!(is_profile_title("About Me.md"));
+        assert!(!is_profile_title("Bio 101 lecture notes.pdf"));
+        assert!(!is_profile_title("Company Profile.pdf"));
+        assert!(!is_profile_title("Service Level Agreement.pdf"));
     }
 
     #[test]

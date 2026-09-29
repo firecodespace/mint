@@ -101,6 +101,52 @@ npm run tauri dev
 The first launch compiles the engine and downloads the embedding model once (needs
 network that one time); after that it runs fully offline.
 
+## How memory is organized (topics)
+
+Every document and note is filed under a **topic** — the schema layer that groups a
+research effort, project, or theme. Routing is a k-nearest-neighbour vote: memories
+already filed and similar to the new content vote for their topic, along with the
+topic's own rolling summary and shared entities (e.g. two notes that both mention
+"I-20" and "DSO"). Identity documents (resume / CV) get a dedicated Profile topic.
+Maintenance re-homes stragglers once their subject exists, and a local LLM keeps a
+rolling summary per topic. You can rename, merge, and move topics from the graph.
+
+Retrieval is topic-aware: hybrid search finds the evidence, the subjects it belongs to
+are activated (the subject of the *best* evidence wins), their members are pulled in,
+named documents ("my resume", "coresum", "HCMA") are injected, and everything is fused
+with weighted reciprocal-rank fusion. Chat receives the subject overview first, then
+the individual memories.
+
+## Benchmarks and tests
+
+A labeled benchmark lives in `crates/mint-core/examples/bench`: documents and notes
+across several subjects, 20 graded queries (vocabulary mismatch, personal questions,
+named documents, topic-scoped questions), capture-guard cases, and optional distractor
+documents including hard negatives. It reports Recall@6, MRR, nDCG@6, Hit@1,
+precision, latency, ingestion throughput, and topic-routing purity (including whether
+a distractor topic absorbed a real subject). Results are saved to
+`crates/mint-core/bench-results/`.
+
+```bash
+cd crates/mint-core
+cargo run --release --example bench -- --label mine --compare baseline
+cargo run --release --example bench -- --label scale --scale 150
+cargo run --release --example bench -- --label llm --llm llama3.2:latest
+cargo test --release
+```
+
+Current results vs. the original pipeline (chat retrieval, local LLM mode):
+
+| Metric | Before | Now |
+|---|---|---|
+| MRR | 0.660 | 1.000 |
+| Hit@1 | 0.50 | 1.00 |
+| nDCG@6 | 0.677 | 0.925 |
+| Recall@6 | 0.912 | 0.975 |
+| p50 latency | 7.8 ms | 4.7 ms |
+| Topic pairwise F1 | 0.733 | 0.944 (0 impure topics with 150 distractors) |
+| Capture-guard accuracy | 0.917 | 1.000 |
+
 ## Development notes
 
 - **Always build from `src-tauri/`** (`npm run tauri dev` does this). `mint-core`

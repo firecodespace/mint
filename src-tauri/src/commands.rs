@@ -84,7 +84,11 @@ pub fn search_memories(
     state: State<AppState>,
     req: SearchRequest,
 ) -> Result<SearchResponse, String> {
-    lock_engine(&state.engine)?.search(req).map_err(|e| e.to_string())
+    let eng = lock_engine(&state.engine)?;
+    let resp = eng.search(req).map_err(|e| e.to_string())?;
+    let ids: Vec<String> = resp.results.iter().map(|r| r.memory.id.clone()).collect();
+    eng.bump_access(&ids);
+    Ok(resp)
 }
 
 #[tauri::command]
@@ -501,6 +505,12 @@ fn run_turn(
         })
         .collect();
     stage(&app, "retrieved", format!("{} relevant memories", retrieved.len()));
+    {
+        // Retrieval counts as usage -> feeds salience.
+        let eng = lock_engine(&engine)?;
+        let ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
+        eng.bump_access(&ids);
+    }
 
     // 2. Build the prompt and stream the answer + thinking.
     let context = format_context(&results);

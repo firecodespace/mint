@@ -26,6 +26,9 @@ impl Default for SyncConfig {
     }
 }
 
+/// Server collection that records deletions for cross-device propagation.
+pub const TOMBSTONES: &str = "mint_tombstones";
+
 /// A point to upsert to the server: vectors + the memory payload.
 pub struct ServerPoint {
     pub id: String, // uuid string
@@ -33,6 +36,13 @@ pub struct ServerPoint {
     pub sparse_indices: Vec<u32>,
     pub sparse_values: Vec<f32>,
     pub payload: serde_json::Value,
+}
+
+/// A tombstone point (a deleted memory).
+pub struct TombstonePoint {
+    pub id_uuid: String,
+    pub memory_id: String,
+    pub deleted_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -126,6 +136,83 @@ impl SyncClient {
             "PUT",
             &format!("/collections/{COLLECTION}/points?wait=true"),
             &body,
+        )?;
+        Ok(())
+    }
+
+    pub fn ensure_tombstone_collection(&self) -> Result<()> {
+        if self.get(&format!("/collections/{TOMBSTONES}")).is_ok() {
+            return Ok(());
+        }
+        let body = serde_json::json!({ "vectors": { "t": { "size": 1, "distance": "Dot" } } });
+        self.send_json("PUT", &format!("/collections/{TOMBSTONES}"), &body)?;
+        Ok(())
+    }
+
+    pub fn upsert_tombstones(&self, points: &[TombstonePoint]) -> Result<()> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        let json_points: Vec<serde_json::Value> = points
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id_uuid,
+                    "vector": { "t": [0.0] },
+                    "payload": { "id": p.memory_id, "deleted_at": p.deleted_at }
+                })
+            })
+            .collect();
+        self.send_json(
+            "PUT",
+            &format!("/collections/{TOMBSTONES}/points?wait=true"),
+            &serde_json::json!({ "points": json_points }),
+        )?;
+        Ok(())
+    }
+
+    /// (memory_id, deleted_at) for every tombstone on the server.
+    pub fn scroll_tombstones(&self) -> Result<Vec<(String, String)>> {
+        let mut out = Vec::new();
+        let mut offset: Option<serde_json::Value> = None;
+        loop {
+            let mut body = serde_json::json!({ "limit": 256, "with_payload": true, "with_vector": false });
+            if let Some(o) = &offset {
+                body["offset"] = o.clone();
+            }
+            let raw = self.send_json(
+                "POST",
+                &format!("/collections/{TOMBSTONES}/points/scroll"),
+                &body,
+            )?;
+            let v: serde_json::Value = serde_json::from_str(&raw)?;
+            let result = &v["result"];
+            if let Some(points) = result["points"].as_array() {
+                for p in points {
+                    let id = p["payload"]["id"].as_str().unwrap_or("").to_string();
+                    let ts = p["payload"]["deleted_at"].as_str().unwrap_or("").to_string();
+                    if !id.is_empty() {
+                        out.push((id, ts));
+                    }
+                }
+            }
+            match result.get("next_page_offset") {
+                Some(next) if !next.is_null() => offset = Some(next.clone()),
+                _ => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Delete points from the main collection by uuid id.
+    pub fn delete_points(&self, uuid_ids: &[String]) -> Result<()> {
+        if uuid_ids.is_empty() {
+            return Ok(());
+        }
+        self.send_json(
+            "POST",
+            &format!("/collections/{COLLECTION}/points/delete?wait=true"),
+            &serde_json::json!({ "points": uuid_ids }),
         )?;
         Ok(())
     }

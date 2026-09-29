@@ -1054,6 +1054,92 @@ ul {
   padding: 6px 10px;
   border-radius: 8px;
 }
+
+/* Graph stats panel (legend sidebar) */
+.graph-panel {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  width: 210px;
+  background: rgba(15, 21, 27, 0.9);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  backdrop-filter: blur(4px);
+}
+.gp-section {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.gp-section:last-of-type {
+  border-bottom: none;
+}
+.gp-section h4 {
+  margin: 0 0 8px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.gp-total {
+  color: var(--text);
+  font-weight: 600;
+}
+.gp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #cdd7e0;
+  padding: 3px 0;
+}
+.gp-row span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gp-row b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.gp-row .lg {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot-stat {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot-stat.recent {
+  background: var(--accent);
+}
+.dot-stat.expiring {
+  background: var(--warn);
+}
+.lg.c-part {
+  background: #d0a8e0;
+}
+.lg.c-mention {
+  background: #d6b84a;
+}
+.lg.c-related {
+  background: #46a0a8;
+}
+.gp-hint {
+  font-size: 10px;
+  color: var(--muted);
+  opacity: 0.7;
+  padding-top: 8px;
+  line-height: 1.4;
+}
 .graph-legend span {
   display: flex;
   align-items: center;

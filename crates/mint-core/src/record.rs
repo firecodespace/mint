@@ -18,6 +18,9 @@ pub enum MemoryKind {
     Entity,
     /// A consolidated summary distilled from several related memories.
     Summary,
+    /// An organizing hub grouping related memories/documents around a subject
+    /// (a research effort, project, or theme). The schema layer of memory.
+    Topic,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -95,6 +98,11 @@ pub struct Memory {
     #[serde(default)]
     pub parent_id: Option<String>,
 
+    /// The Topic this memory is filed under (its organizing subject/schema).
+    /// Assigned by auto-routing; None until routed. Reassignable payload-only.
+    #[serde(default)]
+    pub topic_id: Option<String>,
+
     /// Archived by decay: kept on disk but excluded from retrieval and the graph.
     #[serde(default)]
     pub archived: bool,
@@ -125,6 +133,8 @@ pub struct NewMemory {
     pub sensitivity: Sensitivity,
     #[serde(default)]
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub topic_id: Option<String>,
     #[serde(default)]
     pub due_at: Option<String>,
 }

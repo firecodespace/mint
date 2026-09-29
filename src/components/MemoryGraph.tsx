@@ -154,6 +154,68 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
   const nodesRef = useRef<Node[]>(nodes);
   nodesRef.current = nodes;
 
+  // Legend statistics: counts, connection breakdown, clusters, memory status.
+  const stats = useMemo(() => {
+    const srcNodes = data?.nodes ?? [];
+    const srcEdges = data?.edges ?? [];
+    const byKind: Record<string, number> = {};
+    for (const n of srcNodes) byKind[n.kind] = (byKind[n.kind] || 0) + 1;
+    const byRel: Record<string, number> = {};
+    for (const e of srcEdges) byRel[e.relation] = (byRel[e.relation] || 0) + 1;
+
+    // Connected components over the (non-related) structural graph.
+    const adjm = new Map<string, string[]>();
+    for (const n of srcNodes) adjm.set(n.id, []);
+    for (const e of srcEdges) {
+      adjm.get(e.from)?.push(e.to);
+      adjm.get(e.to)?.push(e.from);
+    }
+    const visited = new Set<string>();
+    let clusters = 0;
+    for (const n of srcNodes) {
+      if (visited.has(n.id)) continue;
+      // ignore singletons for cluster count
+      const stack = [n.id];
+      let size = 0;
+      while (stack.length) {
+        const cur = stack.pop()!;
+        if (visited.has(cur)) continue;
+        visited.add(cur);
+        size++;
+        for (const nb of adjm.get(cur) ?? []) if (!visited.has(nb)) stack.push(nb);
+      }
+      if (size > 1) clusters++;
+    }
+
+    const now = Date.now();
+    let recent = 0;
+    let expiring = 0;
+    for (const m of memories) {
+      if (m.created_at && now - new Date(m.created_at).getTime() < 86400000) recent++;
+      if (m.due_at && !m.done) {
+        const d = new Date(m.due_at + "T00:00:00").getTime();
+        if (Number.isFinite(d) && d >= now - 86400000 && d < now + 7 * 86400000) expiring++;
+      }
+    }
+
+    const memoryKinds = ["note", "observation", "event", "measurement"];
+    const memCount = memoryKinds.reduce((s, k) => s + (byKind[k] || 0), 0);
+    return {
+      memories: memCount,
+      documents: byKind["document"] || 0,
+      entities: byKind["entity"] || 0,
+      summaries: byKind["summary"] || 0,
+      chunks: byKind["doc_chunk"] || 0,
+      connections: srcEdges.length,
+      partOf: byRel["part_of"] || 0,
+      mentions: byRel["mentions"] || 0,
+      related: byRel["related"] || 0,
+      clusters,
+      recent,
+      expiring,
+    };
+  }, [data, memories]);
+
   /** Write current node positions straight to the DOM (no React render). */
   function paint() {
     for (const n of nodesRef.current) {
@@ -326,16 +388,31 @@ export function MemoryGraph({ memories }: { memories: Memory[] }) {
         ))}
       </svg>
 
-      <div className="graph-legend">
-        <span><i className="lg document" /> document</span>
-        <span><i className="lg entity" /> entity</span>
-        <span><i className="lg summary" /> summary</span>
-        <span><i className="lg note" /> memory</span>
-        <span><i className="lg chunk" /> chunk</span>
-        <span><i className="lg e-part" /> part of</span>
-        <span><i className="lg e-mention" /> mentions</span>
-        <span><i className="lg e-rel" /> related</span>
-        <span className="lg-hint">scroll to zoom · drag background to pan · double-click to reset</span>
+      <div className="graph-panel">
+        <div className="gp-section">
+          <h4>Statistics</h4>
+          <div className="gp-row"><i className="lg note" /><span>Memories</span><b>{stats.memories}</b></div>
+          <div className="gp-row"><i className="lg document" /><span>Documents</span><b>{stats.documents}</b></div>
+          <div className="gp-row"><i className="lg entity" /><span>Entities</span><b>{stats.entities}</b></div>
+          <div className="gp-row"><i className="lg summary" /><span>Summaries</span><b>{stats.summaries}</b></div>
+          <div className="gp-row"><i className="lg chunk" /><span>Chunks</span><b>{stats.chunks}</b></div>
+        </div>
+        <div className="gp-section">
+          <h4>Connections <b className="gp-total">{stats.connections}</b></h4>
+          <div className="gp-row"><i className="lg c-part" /><span>Document source</span><b>{stats.partOf}</b></div>
+          <div className="gp-row"><i className="lg c-mention" /><span>Entity mentions</span><b>{stats.mentions}</b></div>
+          <div className="gp-row"><i className="lg c-related" /><span>Related</span><b>{stats.related}</b></div>
+        </div>
+        <div className="gp-section">
+          <h4>Clusters</h4>
+          <div className="gp-row"><span>Visible clusters</span><b>{stats.clusters}</b></div>
+        </div>
+        <div className="gp-section">
+          <h4>Memory status</h4>
+          <div className="gp-row"><i className="dot-stat recent" /><span>Recent (&lt; 24h)</span><b>{stats.recent}</b></div>
+          <div className="gp-row"><i className="dot-stat expiring" /><span>Expiring soon</span><b>{stats.expiring}</b></div>
+        </div>
+        <div className="gp-hint">scroll to zoom · drag to pan · double-click to reset</div>
       </div>
 
       {sel && (

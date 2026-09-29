@@ -85,20 +85,44 @@ is merely asking about.\n\
 - When in doubt, extract nothing. Most turns should yield an empty list.\n\
 Return {\"memories\":[]} when there is nothing genuinely new to store.";
 
-/// A message that is purely a question or greeting yields no memories.
+/// A message that is a question, request, command, or greeting yields no
+/// memories. Only genuinely declarative statements should be captured; being
+/// strict here keeps meta-turns ("check my resume", "what are my strengths")
+/// from manufacturing junk notes that later pollute retrieval.
 fn is_query_only(msg: &str) -> bool {
     let m = msg.trim();
     if m.is_empty() {
         return true;
     }
     let words = m.split_whitespace().count();
-    // Short messages ending in a question mark are questions, not statements.
-    if m.ends_with('?') && words < 16 {
+    // Any question mark on a reasonably short message => a question.
+    if m.ends_with('?') && words < 24 {
         return true;
     }
     let lower = m.to_lowercase();
     const GREETINGS: &[&str] = &["hi", "hello", "hey", "thanks", "thank you", "ok", "okay"];
-    GREETINGS.iter().any(|g| lower == *g)
+    if GREETINGS.iter().any(|g| lower == *g) {
+        return true;
+    }
+    // First word decides intent: a question word or imperative verb means the
+    // user is asking/instructing, not stating a durable fact about themselves.
+    let first = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .find(|w| !w.is_empty())
+        .unwrap_or("");
+    const QUESTION_WORDS: &[&str] = &[
+        "what", "whats", "who", "whos", "when", "where", "why", "how", "hows", "which",
+        "whose", "whom", "is", "are", "am", "do", "does", "did", "can", "could", "would",
+        "should", "will", "was", "were", "may", "might", "have", "has", "had",
+    ];
+    const COMMAND_WORDS: &[&str] = &[
+        "check", "tell", "show", "find", "give", "list", "explain", "summarize", "summarise",
+        "describe", "look", "search", "get", "help", "remind", "please", "compare", "analyze",
+        "analyse", "write", "make", "create", "generate", "suggest", "recommend", "define",
+        "translate", "fix", "draft", "review", "calculate", "convert", "pull", "fetch", "open",
+        "let", "lets",
+    ];
+    QUESTION_WORDS.contains(&first) || COMMAND_WORDS.contains(&first)
 }
 
 /// Reject junk facts the model sometimes emits (empty / "unknown" / too short).
@@ -190,6 +214,7 @@ Only include items that have a real date or deadline. If none, return {{\"items\
                 source: MemorySource::Chat,
                 sensitivity: Sensitivity::Shareable,
                 parent_id: None,
+                topic_id: None,
                 due_at: Some(it.due.trim().to_string()),
             }
         })
@@ -241,6 +266,7 @@ return {{\"memories\":[]}}."
             source: MemorySource::Chat,
             sensitivity: Sensitivity::Shareable,
             parent_id: None,
+            topic_id: None,
             due_at: None,
         })
         .collect();

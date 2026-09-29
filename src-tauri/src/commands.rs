@@ -12,7 +12,7 @@ use mint_core::engine::{MaintenanceReport, SyncCounts};
 use mint_core::graph::GraphData;
 use mint_core::ollama::{ChatMessage, Delta, Ollama};
 use mint_core::record::{
-    Memory, MemoryKind, NewMemory, SearchMode, SearchRequest, SearchResponse, Stats,
+    Memory, MemoryKind, NewMemory, SearchRequest, SearchResponse, Stats,
 };
 use mint_core::sync::{SyncClient, SyncConfig, SyncReport};
 use mint_core::MemoryEngine;
@@ -480,15 +480,9 @@ fn run_turn(
     stage(&app, "retrieving", "searching device memory");
     let results = {
         let eng = lock_engine(&engine)?;
-        eng.search(SearchRequest {
-            query: message.clone(),
-            mode: SearchMode::Hybrid,
-            limit: 6,
-            site_id: None,
-            kind: None,
-        })
-        .map(|r| r.results)
-        .unwrap_or_default()
+        // Deterministic retrieval: hybrid search, plus profile-document chunks
+        // for personal questions and any document the query names by title.
+        eng.retrieve(&message, 6).unwrap_or_default()
     };
     // Entity hub nodes are bare names; keep them out of the chat grounding.
     let results: Vec<_> = results

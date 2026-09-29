@@ -140,6 +140,7 @@ impl MemoryEngine {
     fn ensure_indexes(&self) {
         let keyword_fields = [
             "kind", "site_id", "asset_id", "tags", "sync_state", "source", "parent_id",
+            "topic_id",
         ];
         for field in keyword_fields {
             self.create_index(field, PayloadSchemaType::Keyword);
@@ -192,6 +193,7 @@ impl MemoryEngine {
             sync_state,
             version: 1,
             parent_id: input.parent_id,
+            topic_id: input.topic_id,
             archived: false,
             due_at: input.due_at,
             done: false,
@@ -237,6 +239,7 @@ impl MemoryEngine {
             source: MemorySource::Manual,
             sensitivity: Sensitivity::Shareable,
             parent_id: None,
+            topic_id: None,
             due_at: None,
         })?;
         if let Ok(mut idx) = self.entity_index.lock() {
@@ -399,8 +402,13 @@ impl MemoryEngine {
             source: MemorySource::File,
             sensitivity: Sensitivity::Shareable,
             parent_id: None,
+            topic_id: None,
             due_at: None,
         })?;
+
+        // Route the document to a topic (schema layer), then file its chunks
+        // under the same topic so a research effort stays coherent.
+        let doc_topic = self.route_and_assign(&doc.id, &text, entity_model);
 
         let chunks = documents::chunk_text(&text);
         let n = chunks.len();
@@ -416,6 +424,7 @@ impl MemoryEngine {
                 source: MemorySource::File,
                 sensitivity: Sensitivity::Shareable,
                 parent_id: Some(doc.id.clone()),
+                topic_id: doc_topic.clone(),
                 due_at: None,
             })?;
             if let Ok(mut g) = self.graph.lock() {
@@ -733,6 +742,7 @@ impl MemoryEngine {
                     source: MemorySource::Manual,
                     sensitivity: Sensitivity::Shareable,
                     parent_id: None,
+                    topic_id: None,
                     due_at: None,
                 })?;
                 let _ = self
@@ -938,10 +948,16 @@ impl MemoryEngine {
         })
     }
 
-    /// Retrieval for chat: semantic search PLUS document-reference awareness.
-    /// If the query names a document ("my resume", "the study guide"), that
-    /// document's most relevant chunks are pulled in even when the query words
-    /// don't appear in it. Referenced-document content is prioritized.
+    /// Retrieval for chat. Deterministic and testable:
+    ///   1. Base hybrid semantic search over everything.
+    ///   2. Personal-context injection: a self-referential question ("best
+    ///      internships for me", "what are my strengths") always pulls chunks
+    ///      from the user's PROFILE documents (resume / CV / about-me), so their
+    ///      own background grounds the answer even when the question shares no
+    ///      vocabulary with the resume.
+    ///   3. Named-document injection: naming a document ("check my resume",
+    ///      "the study guide") pulls that document's chunks in directly.
+    /// Injected chunks lead the context; the rest fills the remaining slots.
     pub fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let base = self
             .search(SearchRequest {
@@ -953,21 +969,30 @@ impl MemoryEngine {
             })?
             .results;
 
-        let refs = self.referenced_documents(query).unwrap_or_default();
-        if refs.is_empty() {
+        // Which documents to pull directly: the user's profile for personal
+        // questions, plus any document the query names by title.
+        let mut inject_docs: Vec<String> = Vec::new();
+        if is_self_referential(query) {
+            inject_docs.extend(self.profile_documents().unwrap_or_default());
+        }
+        inject_docs.extend(self.referenced_documents(query).unwrap_or_default());
+        inject_docs.sort();
+        inject_docs.dedup();
+
+        if inject_docs.is_empty() {
             return Ok(base);
         }
 
         let (dense, sparse) = self.embedders.embed_query(query)?;
-        let per_doc = if refs.len() == 1 { 4 } else { 2 };
+        let per_doc = if inject_docs.len() == 1 { 4 } else { 2 };
         let mut injected: Vec<SearchResult> = Vec::new();
-        for doc_id in &refs {
+        for doc_id in &inject_docs {
             if let Ok(hits) = self.search_in_doc(&dense, &sparse, doc_id, per_doc) {
                 injected.extend(hits);
             }
         }
 
-        // Referenced-document chunks first, then the semantic results; dedup.
+        // Injected (profile / named-doc) chunks first, then semantic results.
         let mut seen = std::collections::HashSet::new();
         let mut merged: Vec<SearchResult> = Vec::new();
         for r in injected.into_iter().chain(base.into_iter()) {
@@ -977,6 +1002,31 @@ impl MemoryEngine {
         }
         merged.truncate(limit);
         Ok(merged)
+    }
+
+    /// Documents that describe the user themselves (resume / CV / about-me),
+    /// used to ground answers to personal questions.
+    fn profile_documents(&self) -> Result<Vec<String>> {
+        const PROFILE_HINTS: &[&str] = &[
+            "resume", "resumé", "résumé", "cv", "curriculum vitae", "curriculum-vitae",
+            "about me", "about-me", "aboutme", "profile", "bio", "biodata",
+        ];
+        Ok(self
+            .list_documents()?
+            .into_iter()
+            .filter(|m| {
+                let t = m.title.to_lowercase();
+                PROFILE_HINTS.iter().any(|h| {
+                    // Match "cv" only as a whole word so "service.pdf" doesn't hit.
+                    if *h == "cv" {
+                        t.split(|c: char| !c.is_alphanumeric()).any(|w| w == "cv")
+                    } else {
+                        t.contains(h)
+                    }
+                })
+            })
+            .map(|m| m.id)
+            .collect())
     }
 
     /// Documents whose title is referenced by the query (word overlap).
@@ -1165,6 +1215,17 @@ fn jpath(field: &str) -> JsonPath {
     field.parse().expect("valid payload field path")
 }
 
+/// Does the query ask about the user themselves? Detects first-person pronouns
+/// as whole words ("what internships are best for me", "my strengths", "should
+/// I ...") so we ground the answer in the user's own profile documents.
+fn is_self_referential(query: &str) -> bool {
+    const PRONOUNS: &[&str] = &["me", "my", "mine", "myself", "i", "im", "id", "ive"];
+    let lower = query.to_lowercase();
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| PRONOUNS.contains(&w))
+}
+
 /// Truncate to at most `max` characters (char-safe).
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -1194,6 +1255,7 @@ fn salience_of(m: &Memory, degree: usize, access: u32) -> f32 {
         | MemoryKind::Event
         | MemoryKind::Measurement
         | MemoryKind::Summary => 1.0,
+        MemoryKind::Topic => 0.95,
         MemoryKind::Entity => 0.9,
         MemoryKind::Document => 0.85,
         MemoryKind::DocChunk => 0.5,

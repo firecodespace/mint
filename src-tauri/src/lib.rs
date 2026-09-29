@@ -80,6 +80,8 @@ pub fn run() {
             commands::sync_now,
             commands::run_maintenance,
             commands::clear_archive,
+            commands::list_scheduled,
+            commands::set_task_done,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

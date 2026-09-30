@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Tauri commands: the bridge between the React UI and mint-core.
 
 use std::sync::{Arc, Mutex};

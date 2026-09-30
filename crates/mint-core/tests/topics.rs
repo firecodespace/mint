@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! End-to-end tests for the topic (schema) layer against a real engine:
 //! real embeddings, a real Qdrant Edge shard, no LLM. Uses the shared model
 //! cache (MINT_MODELS_DIR or <repo>/.mint-data/models).

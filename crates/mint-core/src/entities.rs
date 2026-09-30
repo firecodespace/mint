@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Entity extraction: pull the key named entities (typed) from text so they can
 //! become connective hub nodes in the knowledge graph. Local (Ollama).
 

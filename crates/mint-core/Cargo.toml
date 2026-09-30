@@ -3,6 +3,7 @@ name = "mint-core"
 version = "0.1.0"
 edition = "2021"
 authors = ["Xarch Labs"]
+license = "AGPL-3.0-or-later"
 description = "Mint cognitive memory engine: Qdrant Edge + fastembed, local-first."
 
 [lib]

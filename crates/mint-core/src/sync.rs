@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Edge -> cloud synchronization against a Qdrant Server over its REST API.
 //! Uses ureq (already in tree). The cloud is optional: everything works offline,
 //! and sync only runs when a server is reachable and the user is "online".

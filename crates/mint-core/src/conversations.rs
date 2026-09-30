@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Local conversation store. Persists chat threads as JSON in the data dir so
 //! "continue chat" survives restarts. Each conversation links the memory ids it
 //! produced, so deleting a chat can optionally purge those memories too.

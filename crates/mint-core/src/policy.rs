@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Sync policy: decides, per memory, whether it may leave the device.
 //!
 //! Deterministic and local (no LLM, no network): it runs on every write and

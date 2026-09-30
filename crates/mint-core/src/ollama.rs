@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Local Ollama client. Localhost only, fully offline. Uses `ureq` (already in
 //! our dependency tree via fastembed) so we add no heavy new dependencies.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Chat + memory-capture logic, reusable across surfaces (Tauri app, CLI later).
 //!
 //! The orchestration (streaming to the UI, emitting stage events) lives in the

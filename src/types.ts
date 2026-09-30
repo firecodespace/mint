@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 // Shared TS mirror of the Rust `Memory` record and command payloads.
 // Keep in sync with src-tauri/src/memory/record.rs
 

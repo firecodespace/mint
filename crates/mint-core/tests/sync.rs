@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Edge <-> cloud sync against a REAL Qdrant Server (localhost:6333), with two
 //! simulated devices (separate engines, separate device ids). Every test uses
 //! its own throwaway collection, deleted afterwards; the app's real collection

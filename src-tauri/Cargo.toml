@@ -3,6 +3,7 @@ name = "mint"
 version = "0.1.0"
 edition = "2021"
 authors = ["Xarch Labs"]
+license = "AGPL-3.0-or-later"
 description = "Mint — AI-Powered Edge Memory & Intelligence Platform (offline-first)"
 
 [lib]

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 import { useState } from "react";
 import { searchMemories } from "../api";
 import type { MemoryKind, SearchMode, SearchResponse } from "../types";

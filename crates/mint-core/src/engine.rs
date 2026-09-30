@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! The on-device memory engine: an embedded Qdrant Edge shard plus local
 //! embedders. All operations are synchronous, in-process, and offline.
 

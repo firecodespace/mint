@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Mint retrieval + memory-organization benchmark.
 //!
 //! Builds a throwaway engine, ingests a labeled corpus, and measures:

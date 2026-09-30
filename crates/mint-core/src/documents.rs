@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Document ingestion helpers: parse bytes to text by file type, and chunk text
 //! into embeddable pieces. Runs fully locally.
 

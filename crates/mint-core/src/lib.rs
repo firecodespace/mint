@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! mint-core: the local-first cognitive memory engine.
 //!
 //! Embeds Qdrant Edge (vector store) + fastembed (embeddings), fully offline.

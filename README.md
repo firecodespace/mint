@@ -8,6 +8,8 @@ reachable. It decides what may leave the device and what never should.
 Built on **Qdrant Edge** (embedded vector search), **fastembed** (local embeddings),
 and **Ollama** (local language models), in a **Tauri** desktop app with a **Rust** engine.
 
+Licensed under the **GNU AGPL v3.0 or later**. See [License](#15-license).
+
 ---
 
 ## Contents
@@ -26,6 +28,7 @@ and **Ollama** (local language models), in a **Tauri** desktop app with a **Rust
 12. [Troubleshooting](#12-troubleshooting)
 13. [Project layout](#13-project-layout)
 14. [Known limitations](#14-known-limitations)
+15. [License](#15-license)
 
 ---
 
@@ -601,6 +604,28 @@ src/                     React UI
 - The benchmark is modest in size (20 questions); a perfect score means it should be
   made harder, not that retrieval is perfect.
 - Not yet built: a localhost API and CLI, image understanding, an OS-vault for secrets.
+
+
+## 15. License
+
+Copyright (C) 2026 Xarch Labs.
+
+Mint is free software: you can redistribute it and/or modify it under the terms of the
+**GNU Affero General Public License** as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version. It is
+distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+[LICENSE](LICENSE) file for the full text.
+
+In short: you may use, study, modify, and share Mint. If you distribute Mint or a
+modified version, or let people use a modified version over a network, you must make
+the complete corresponding source code available under the same license.
+
+Third-party components keep their own licenses (Qdrant Edge, fastembed, Tauri, and
+pdfium are under permissive licenses compatible with the AGPL; language models pulled
+through Ollama are under their publishers' licenses).
+
+Contributions are accepted under the same license.
 
 ---
 Thank You

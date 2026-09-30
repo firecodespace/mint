@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 import { useEffect, useRef, useState } from "react";
 import { deleteDocument, ingestDocument, listDocuments } from "../api";
 import type { Memory } from "../types";

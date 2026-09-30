@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Labeled benchmark corpus: documents + notes across several subjects (with
 //! distractors), and queries with graded relevance judgments. Modeled on real
 //! usage: research papers, a resume, a study guide, personal goals.

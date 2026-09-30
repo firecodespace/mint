@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! On-device embeddings, fully local:
 //!  - Dense: fastembed (ONNX, all-MiniLM-L6-v2, 384d). Model downloaded once on
 //!    first run into the cache dir, then offline forever.

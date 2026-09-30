@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 // Thin wrappers over Tauri commands exposed by the Rust core.
 import { invoke } from "@tauri-apps/api/core";
 import type {

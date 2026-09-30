@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Side metadata that changes without re-embedding: which memories are archived
 //! (by decay) and which summary node belongs to which entity. Persisted as
 //! meta.json in the data dir.

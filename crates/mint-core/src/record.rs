@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! The on-device unit of memory. Serializes 1:1 into the Qdrant Edge point
 //! payload, so a round-trip (upsert -> query/scroll -> deserialize) reconstructs
 //! the full record. Mirrored in the frontend at src/types.ts.

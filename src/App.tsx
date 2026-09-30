@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 import { useCallback, useEffect, useState } from "react";
 import "./App.css";
 import { chatStatus, getStats, listMemories, runMaintenance } from "./api";

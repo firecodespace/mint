@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Xarch Labs
 //! Persistent relationship layer over memories. Edges are established by the AI
 //! (embedding nearest-neighbours = "related") and by document structure
 //! (chunk -> document = "part_of"). Stored as edges.json in the data dir.

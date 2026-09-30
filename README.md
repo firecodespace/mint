@@ -424,7 +424,7 @@ extraction and summaries. Any other pulled models can be used instead (see
 ### 7.3 Get the code
 
 ```bash
-git clone <this-repository-url> mint
+git clone https://github.com/firecodespace/mint.git
 cd mint
 npm install
 ```

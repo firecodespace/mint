@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn real_entities_are_kept() {
         for s in [
-            "Kepler", "Xarch Labs", "CoreSum", "Gaussian Process", "Stanford University",
+            "Kepler", "Brightline Labs", "CoreSum", "Gaussian Process", "Stanford University",
             "Yamaha", "SEVIS", "Marchetti", "Mayo Clinic",
         ] {
             assert!(!is_temporal_or_filler(s), "should keep: {s}");
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn normalize_merges_aliases() {
         assert_eq!(normalize("Stanford University"), normalize("stanford"));
-        assert_eq!(normalize("Xarch Labs, Inc."), normalize("xarch labs"));
+        assert_eq!(normalize("Brightline Labs, Inc."), normalize("brightline labs"));
         assert_eq!(normalize("Form I-20"), normalize("I-20"));
         assert_eq!(normalize("Project Apollo"), normalize("Apollo"));
         // A lone generic word stays itself.

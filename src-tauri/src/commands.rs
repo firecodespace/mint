@@ -49,6 +49,64 @@ pub struct SyncRuntime {
     pub last_sync: Option<String>,
     pub last_report: Option<SyncReport>,
     pub history: Vec<SyncEvent>,
+    /// Where settings persist (`<data dir>/sync.json`); None = not persisted.
+    pub path: Option<std::path::PathBuf>,
+}
+
+/// Sync settings saved across restarts. The API key is stored locally in the
+/// app's data directory and is never sent back to the UI.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct SyncSettings {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    online: Option<bool>,
+    #[serde(default)]
+    auto: Option<bool>,
+    #[serde(default)]
+    pull_all: Option<bool>,
+}
+
+impl SyncRuntime {
+    /// Defaults, then saved settings; QDRANT_URL / QDRANT_API_KEY environment
+    /// variables, when set, take precedence over saved values.
+    pub fn load(data_dir: &std::path::Path) -> Self {
+        let mut rt = Self::default();
+        let path = data_dir.join("sync.json");
+        if let Ok(bytes) = std::fs::read(&path) {
+            if let Ok(s) = serde_json::from_slice::<SyncSettings>(&bytes) {
+                if std::env::var("QDRANT_URL").is_err() {
+                    if let Some(u) = s.url.filter(|u| !u.trim().is_empty()) {
+                        rt.cfg.url = u;
+                    }
+                }
+                if std::env::var("QDRANT_API_KEY").is_err() && s.api_key.is_some() {
+                    rt.cfg.api_key = s.api_key.filter(|k| !k.is_empty());
+                }
+                rt.online = s.online.unwrap_or(rt.online);
+                rt.auto = s.auto.unwrap_or(rt.auto);
+                rt.pull_all = s.pull_all.unwrap_or(rt.pull_all);
+            }
+        }
+        rt.path = Some(path);
+        rt
+    }
+
+    pub fn save(&self) {
+        let Some(p) = &self.path else { return };
+        let s = SyncSettings {
+            url: Some(self.cfg.url.clone()),
+            api_key: self.cfg.api_key.clone(),
+            online: Some(self.online),
+            auto: Some(self.auto),
+            pull_all: Some(self.pull_all),
+        };
+        if let Ok(bytes) = serde_json::to_vec_pretty(&s) {
+            let _ = std::fs::write(p, bytes);
+        }
+    }
 }
 
 impl Default for SyncRuntime {
@@ -68,6 +126,7 @@ impl Default for SyncRuntime {
             last_sync: None,
             last_report: None,
             history: Vec::new(),
+            path: None,
         }
     }
 }
@@ -125,55 +184,119 @@ pub fn run_sync(
     result
 }
 
-/// Background auto-sync: every few seconds, when online and auto-sync is on,
-/// sync if the server just became reachable, if there are pending changes, or
-/// periodically (to receive other devices' changes). Never blocks chat for
-/// long: all network calls have short timeouts.
-pub fn spawn_auto_sync(app: AppHandle, engine: Arc<Mutex<MemoryEngine>>, sync: Arc<Mutex<SyncRuntime>>) {
+/// Seconds since the Unix epoch (for the chat-activity marker).
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Background worker, one tick every 10 s, two independent jobs:
+///   1. Auto-sync: when online and enabled, sync if the server just became
+///      reachable, if there are pending changes, or every 2 minutes (to
+///      receive other devices' changes). All network calls time out quickly.
+///   2. Entity enrichment: link memories that lack entities (pulled from
+///      another device, or stored before entities existed) using the local
+///      LLM. The LLM call runs OUTSIDE the engine lock, a few items per tick,
+///      and only when chat has been idle for 20 s, so it never slows a chat.
+pub fn spawn_background(
+    app: AppHandle,
+    engine: Arc<Mutex<MemoryEngine>>,
+    sync: Arc<Mutex<SyncRuntime>>,
+    ollama: Arc<Ollama>,
+    fast_model: String,
+    last_chat: Arc<std::sync::atomic::AtomicU64>,
+) {
     std::thread::spawn(move || {
         let tick = std::time::Duration::from_secs(10);
         let periodic = std::time::Duration::from_secs(120);
         let mut was_reachable = false;
         let mut last_run: Option<std::time::Instant> = None;
+        let mut enrich_idle_ticks = 0u32;
         loop {
             std::thread::sleep(tick);
+
+            // ---- 1. auto-sync ------------------------------------------------
             let (online, auto, cfg) = match sync.lock() {
                 Ok(s) => (s.online, s.auto, s.cfg.clone()),
                 Err(_) => continue,
             };
-            if !online || !auto {
+            if online && auto {
+                let reachable = SyncClient::new(cfg).reachable();
+                if let Ok(mut s) = sync.lock() {
+                    s.reachable = reachable;
+                }
+                if reachable {
+                    let reconnected = !was_reachable;
+                    was_reachable = true;
+                    let pending = engine
+                        .lock()
+                        .ok()
+                        .and_then(|e| e.sync_counts().ok())
+                        .map(|c| c.pending)
+                        .unwrap_or(0);
+                    let due = last_run.map(|t| t.elapsed() >= periodic).unwrap_or(true);
+                    let trigger = if reconnected {
+                        Some("reconnected")
+                    } else if pending > 0 {
+                        Some("pending changes")
+                    } else if due {
+                        Some("periodic")
+                    } else {
+                        None
+                    };
+                    if let Some(trigger) = trigger {
+                        let result = run_sync(&engine, &sync, trigger);
+                        last_run = Some(std::time::Instant::now());
+                        let _ = app.emit("sync:done", result.is_ok());
+                        if result.map(|r| r.pulled > 0).unwrap_or(false) {
+                            enrich_idle_ticks = 0; // new content: look now
+                        }
+                    }
+                } else {
+                    was_reachable = false;
+                }
+            } else {
                 was_reachable = false;
+            }
+
+            // ---- 2. entity enrichment -----------------------------------------
+            // After an empty backlog, re-check only every 6th tick (~1 min).
+            if enrich_idle_ticks > 0 {
+                enrich_idle_ticks -= 1;
                 continue;
             }
-            let reachable = SyncClient::new(cfg).reachable();
-            if let Ok(mut s) = sync.lock() {
-                s.reachable = reachable;
-            }
-            if !reachable {
-                was_reachable = false;
+            let chat_idle =
+                now_secs().saturating_sub(last_chat.load(std::sync::atomic::Ordering::Relaxed)) >= 20;
+            if !chat_idle || fast_model.is_empty() || !ollama.is_up() {
                 continue;
             }
-            let reconnected = !was_reachable;
-            was_reachable = true;
-            let pending = engine
+            let backlog = engine
                 .lock()
                 .ok()
-                .and_then(|e| e.sync_counts().ok())
-                .map(|c| c.pending)
-                .unwrap_or(0);
-            let due = last_run.map(|t| t.elapsed() >= periodic).unwrap_or(true);
-            let trigger = if reconnected {
-                "reconnected"
-            } else if pending > 0 {
-                "pending changes"
-            } else if due {
-                "periodic"
-            } else {
+                .and_then(|e| e.entity_backlog(3).ok())
+                .unwrap_or_default();
+            if backlog.is_empty() {
+                enrich_idle_ticks = 6;
                 continue;
-            };
-            let result = run_sync(&engine, &sync, trigger);
-            last_run = Some(std::time::Instant::now());
-            let _ = app.emit("sync:done", result.is_ok());
+            }
+            let mut linked = 0;
+            for (id, text) in backlog {
+                // Extraction (slow, LLM) happens without the engine lock.
+                let ents = match mint_core::entities::extract(&ollama, &fast_model, &text) {
+                    Ok(e) => e,
+                    Err(_) => break, // Ollama busy/unavailable: try next tick
+                };
+                if let Ok(e) = engine.lock() {
+                    if e.link_extracted_entities(&id, &ents).is_ok() {
+                        linked += 1;
+                    }
+                }
+            }
+            if linked > 0 {
+                let _ = app.emit("memory:enriched", linked);
+            }
         }
     });
 }
@@ -189,6 +312,9 @@ pub struct AppState {
     pub sync: Arc<Mutex<SyncRuntime>>,
     pub chat_model: String,
     pub fast_model: String,
+    /// Unix seconds of the last chat activity (background enrichment waits
+    /// until chat has been idle, so it never competes with a turn for the LLM).
+    pub last_chat: Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn lock_convos(
@@ -433,6 +559,8 @@ pub struct SyncStatus {
     pub pull_all: bool,
     pub device_id: String,
     pub history: Vec<SyncEvent>,
+    /// Whether an API key is configured (the key itself is never exposed).
+    pub has_api_key: bool,
 }
 
 fn lock_sync<'a>(
@@ -460,6 +588,7 @@ pub async fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, Strin
             )
         };
         let url = cfg.url.clone();
+        let has_api_key = cfg.api_key.is_some();
         // Only ping the server when "online" (airplane mode off).
         let reachable = online && SyncClient::new(cfg).reachable();
         if let Ok(mut s) = lock_sync(&sync) {
@@ -480,6 +609,7 @@ pub async fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, Strin
             pull_all,
             device_id,
             history,
+            has_api_key,
         })
     })
     .await
@@ -488,13 +618,17 @@ pub async fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, Strin
 
 #[tauri::command]
 pub fn set_auto_sync(state: State<AppState>, enabled: bool) -> Result<(), String> {
-    lock_sync(&state.sync)?.auto = enabled;
+    let mut s = lock_sync(&state.sync)?;
+    s.auto = enabled;
+    s.save();
     Ok(())
 }
 
 #[tauri::command]
 pub fn set_pull_all(state: State<AppState>, enabled: bool) -> Result<(), String> {
-    lock_sync(&state.sync)?.pull_all = enabled;
+    let mut s = lock_sync(&state.sync)?;
+    s.pull_all = enabled;
+    s.save();
     Ok(())
 }
 
@@ -531,13 +665,28 @@ pub fn version_chain(state: State<AppState>, id: String) -> Result<Vec<Memory>, 
 
 #[tauri::command]
 pub fn set_online(state: State<AppState>, online: bool) -> Result<(), String> {
-    lock_sync(&state.sync)?.online = online;
+    let mut s = lock_sync(&state.sync)?;
+    s.online = online;
+    s.save();
     Ok(())
 }
 
 #[tauri::command]
 pub fn set_server_url(state: State<AppState>, url: String) -> Result<(), String> {
-    lock_sync(&state.sync)?.cfg.url = url;
+    let mut s = lock_sync(&state.sync)?;
+    s.cfg.url = url.trim().to_string();
+    s.save();
+    Ok(())
+}
+
+/// Set (or clear, with an empty string) the Qdrant API key, e.g. for Qdrant
+/// Cloud. Stored locally in the app's data directory; never returned to the UI.
+#[tauri::command]
+pub fn set_api_key(state: State<AppState>, key: String) -> Result<(), String> {
+    let mut s = lock_sync(&state.sync)?;
+    let k = key.trim().to_string();
+    s.cfg.api_key = if k.is_empty() { None } else { Some(k) };
+    s.save();
     Ok(())
 }
 
@@ -707,9 +856,11 @@ pub async fn chat(
     let chat_model = state.chat_model.clone();
     let fast_model = state.fast_model.clone();
     let sync = state.sync.clone();
+    let last_chat = state.last_chat.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        run_turn(
+        last_chat.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+        let result = run_turn(
             app,
             engine,
             conversations,
@@ -720,7 +871,9 @@ pub async fn chat(
             conversation_id,
             message,
             history,
-        )
+        );
+        last_chat.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+        result
     })
     .await
     .map_err(|e| format!("chat task failed: {e}"))?

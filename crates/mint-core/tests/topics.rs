@@ -145,6 +145,32 @@ fn organize_files_existing_memories() {
 }
 
 #[test]
+fn background_entity_enrichment_links_unlinked_memories_once() {
+    use mint_core::entities::ExtractedEntity;
+    let (eng, dir) = engine("enrich");
+    let a = note(&eng, "Visited the Kepler exhibit at the science museum");
+    let (doc, _) = eng.ingest_text("Piano Plan.txt", PIANO_DOC, "").unwrap();
+    // Nothing has entities yet (no LLM in this test): both are in the backlog.
+    let backlog = eng.entity_backlog(10).unwrap();
+    let ids: Vec<&str> = backlog.iter().map(|(id, _)| id.as_str()).collect();
+    assert!(ids.contains(&a.as_str()) && ids.contains(&doc.id.as_str()));
+    // The document is represented by its content, not just the title.
+    let doc_text = &backlog.iter().find(|(id, _)| id == &doc.id).unwrap().1;
+    assert!(doc_text.contains("Debussy"));
+    // Link extracted entities (as the background job does after the LLM call).
+    let ents = vec![ExtractedEntity { name: "Kepler".into(), etype: "concept".into() }];
+    let linked = eng.link_extracted_entities(&a, &ents).unwrap();
+    assert_eq!(linked.len(), 1);
+    // A memory with no entities found is still marked done: no repeat work.
+    eng.link_extracted_entities(&doc.id, &[]).unwrap();
+    assert!(eng.entity_backlog(10).unwrap().is_empty());
+    let g = eng.graph_data().unwrap();
+    assert!(g.edges.iter().any(|e| e.relation == "mentions" && e.from == a));
+    drop(eng);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn retrieval_reports_the_active_subject() {
     let (eng, dir) = engine("retrieve");
     let (piano, _) = eng.ingest_text("Piano Plan.txt", PIANO_DOC, "").unwrap();

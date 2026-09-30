@@ -132,15 +132,15 @@ carefully, and budget for deposits and utilities.",
         key: "resume_doc",
         title: "Resume (Aug 2026) (1).pdf",
         topic: "profile",
-        text: "Yash Bendresh
-Computer Science and Engineering student | Founder, Xarch Labs
+        text: "Alex Rivera
+Computer Science and Engineering student | Founder, Brightline Labs
 
 EDUCATION
 B.Tech in Computer Science and Engineering, expected 2027. Coursework: machine \
 learning, distributed systems, computer networks, IoT-based product design, databases.
 
 EXPERIENCE
-Founder, Xarch Labs (2025 - present). Building local-first AI products. Led design of an \
+Founder, Brightline Labs (2025 - present). Building local-first AI products. Led design of an \
 offline memory engine using vector search and on-device language models. Managed a small \
 team and shipped a desktop application.
 
@@ -349,7 +349,7 @@ pub const POLICY_CASES: &[PolicyCase] = &[
     PolicyCase { text: "I was diagnosed with asthma last year", local: Some("health") },
     PolicyCase { text: "my therapist moved our session to Thursday", local: Some("health") },
     PolicyCase { text: "I take 50mg of medication every morning", local: Some("health") },
-    PolicyCase { text: "email me at yash@example.com", local: Some("contact") },
+    PolicyCase { text: "email me at alex@example.com", local: Some("contact") },
     PolicyCase { text: "call the landlord at +91 98765 43210", local: Some("contact") },
     PolicyCase { text: "my address is 12 MG Road, Pune", local: Some("contact") },
     PolicyCase { text: "reset my password tomorrow", local: None },
@@ -367,6 +367,18 @@ pub const POLICY_CASES: &[PolicyCase] = &[
     PolicyCase { text: "Bought a Yamaha P-45 keyboard for 45000 rupees", local: None },
     PolicyCase { text: "Order 1234567 shipped yesterday", local: None },
     PolicyCase { text: "The API key rotation policy is every 90 days", local: None },
+    // Phone numbers in real formats must stay local ...
+    PolicyCase { text: "my number is 98765 43210", local: Some("contact") },
+    PolicyCase { text: "office line (415) 555-2671", local: Some("contact") },
+    PolicyCase { text: "London office +44 20 7946 0958", local: Some("contact") },
+    // ... while academic-paper digit runs must still sync.
+    PolicyCase { text: "Table 3 1 2 3 4 5 6 7 8 9 10 11 12", local: None },
+    PolicyCase { text: "Brown et al. Language models are few-shot learners. NeurIPS 33:1877-1901, 2020", local: None },
+    PolicyCase { text: "doi:10.1109/TPAMI.2021.3057446", local: None },
+    PolicyCase { text: "arXiv preprint arXiv:2210.08481, 2022", local: None },
+    PolicyCase { text: "editions published in 2017 2018 2019", local: None },
+    PolicyCase { text: "ISBN 978-0-262-03384-8", local: None },
+    PolicyCase { text: "accuracy 91.2 88.4 90.1 87.9 89.5 92.3", local: None },
 ];
 
 /// Version-chain case: earlier memories, then a new one; which earlier memory
@@ -399,8 +411,8 @@ pub const VERSION_CASES: &[VersionCase] = &[
 
 pub const CAPTURE_CASES: &[CaptureCase] = &[
     // Durable statements: should be captured.
-    CaptureCase { text: "My name is Yash", capture: true },
-    CaptureCase { text: "I work at Xarch Labs as the founder", capture: true },
+    CaptureCase { text: "My name is Alex", capture: true },
+    CaptureCase { text: "I work at Brightline Labs as the founder", capture: true },
     CaptureCase { text: "I prefer dark roast coffee", capture: true },
     CaptureCase { text: "I decided to use Rust for the backend", capture: true },
     CaptureCase { text: "My exam is on Friday", capture: true },

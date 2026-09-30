@@ -385,8 +385,8 @@ mod tests {
     #[test]
     fn statements_are_captured() {
         for s in [
-            "My name is Yash",
-            "I work at Xarch Labs as the founder",
+            "My name is Alex",
+            "I work at Brightline Labs as the founder",
             "I decided to use Rust for the backend",
             "My exam is on Friday",
             "We moved the launch to October",

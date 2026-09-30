@@ -407,10 +407,22 @@ impl MemoryEngine {
     /// Extract typed entities from `text` and link `from_id` to them via "mentions".
     pub fn attach_entities(&self, from_id: &str, text: &str, model: &str) -> Result<Vec<String>> {
         let ents = entities::extract(&self.ollama, model, text)?;
+        self.link_extracted_entities(from_id, &ents)
+    }
+
+    /// Link a memory to already-extracted entities (creating/deduping entity
+    /// hubs) and mark it done for background enrichment. Split from
+    /// `attach_entities` so the slow LLM extraction can run WITHOUT holding
+    /// the engine lock.
+    pub fn link_extracted_entities(
+        &self,
+        from_id: &str,
+        ents: &[entities::ExtractedEntity],
+    ) -> Result<Vec<String>> {
         let mut ids = Vec::new();
         for e in ents {
             if let Ok(id) = self.find_or_create_entity(&e.name, &e.etype) {
-                if id != from_id {
+                if id != from_id && !ids.contains(&id) {
                     ids.push(id);
                 }
             }
@@ -418,7 +430,53 @@ impl MemoryEngine {
         if let Ok(mut g) = self.graph.lock() {
             let _ = g.set_mentions(from_id, &ids);
         }
+        if let Ok(mut m) = self.meta.lock() {
+            let _ = m.mark_entity_checked(from_id);
+        }
         Ok(ids)
+    }
+
+    /// Memories that still need entity links: pulled from another device
+    /// (entities are derived locally and never sync) or stored before entity
+    /// extraction existed. Returns (id, text to extract from), newest first.
+    pub fn entity_backlog(&self, max: usize) -> Result<Vec<(String, String)>> {
+        let linked: std::collections::HashSet<String> = self
+            .graph
+            .lock()
+            .map(|g| {
+                g.all()
+                    .iter()
+                    .filter(|e| e.relation == "mentions")
+                    .map(|e| e.from.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for m in self.list_active()? {
+            if !matches!(
+                m.kind,
+                MemoryKind::Document
+                    | MemoryKind::Note
+                    | MemoryKind::Observation
+                    | MemoryKind::Event
+                    | MemoryKind::Measurement
+            ) || m.superseded_by.is_some()
+                || linked.contains(&m.id)
+                || self.meta.lock().map(|x| x.is_entity_checked(&m.id)).unwrap_or(true)
+            {
+                continue;
+            }
+            let text = if m.kind == MemoryKind::Document {
+                self.document_probe(&m)
+            } else {
+                m.text.clone()
+            };
+            out.push((m.id, truncate(&text, 3000)));
+            if out.len() >= max {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// Find this memory's nearest neighbours and record "related" edges.
@@ -3159,7 +3217,7 @@ mod tests {
     fn profile_titles_are_unambiguous() {
         use super::is_profile_title;
         assert!(is_profile_title("Resume (Aug 2026) (1).pdf"));
-        assert!(is_profile_title("Yash_CV_2026.pdf"));
+        assert!(is_profile_title("Alex_CV_2026.pdf"));
         assert!(is_profile_title("About Me.md"));
         assert!(!is_profile_title("Bio 101 lecture notes.pdf"));
         assert!(!is_profile_title("Company Profile.pdf"));

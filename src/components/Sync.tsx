@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   policySummary,
+  setApiKey,
   setAutoSync,
   setOnline,
   setPullAll,
@@ -43,6 +44,7 @@ export function Sync({ onChange }: { onChange: () => void }) {
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [policy, setPolicy] = useState<PolicySummary | null>(null);
   const [urlDraft, setUrlDraft] = useState("");
+  const [keyDraft, setKeyDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<SyncReport | null>(null);
@@ -105,6 +107,12 @@ export function Sync({ onChange }: { onChange: () => void }) {
 
   async function saveUrl() {
     await setServerUrl(urlDraft.trim());
+    await refresh();
+  }
+
+  async function saveKey(clear: boolean) {
+    await setApiKey(clear ? "" : keyDraft.trim());
+    setKeyDraft("");
     await refresh();
   }
 
@@ -203,6 +211,26 @@ export function Sync({ onChange }: { onChange: () => void }) {
                 <button className="ghost" onClick={saveUrl}>
                   Save
                 </button>
+              </div>
+            </label>
+            <label>
+              API key (Qdrant Cloud)
+              <div className="url-row">
+                <input
+                  type="password"
+                  value={keyDraft}
+                  onChange={(e) => setKeyDraft(e.target.value)}
+                  placeholder={status?.has_api_key ? "A key is saved" : "Not needed for a local server"}
+                  autoComplete="off"
+                />
+                <button className="ghost" onClick={() => saveKey(false)} disabled={!keyDraft.trim()}>
+                  Save
+                </button>
+                {status?.has_api_key && (
+                  <button className="ghost" onClick={() => saveKey(true)}>
+                    Clear
+                  </button>
+                )}
               </div>
             </label>
             {status?.device_id && <p className="muted device-id">This device: {status.device_id}</p>}

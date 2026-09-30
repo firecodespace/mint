@@ -114,6 +114,11 @@ export function syncNow(): Promise<SyncReport> {
   return invoke<SyncReport>("sync_now");
 }
 
+/** Set or clear (empty string) the Qdrant API key, e.g. for Qdrant Cloud. */
+export function setApiKey(key: string): Promise<void> {
+  return invoke<void>("set_api_key", { key });
+}
+
 export function setAutoSync(enabled: boolean): Promise<void> {
   return invoke<void>("set_auto_sync", { enabled });
 }

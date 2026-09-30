@@ -283,4 +283,6 @@ export interface SyncStatus {
   pull_all: boolean;
   device_id: string;
   history: SyncEvent[];
+  /** An API key is configured (the key itself is never sent to the UI). */
+  has_api_key: boolean;
 }

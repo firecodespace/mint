@@ -48,18 +48,29 @@ pub fn run() {
             log::info!("Ollama chat model: {chat_model} | fast model: {fast_model}");
 
             let engine = Arc::new(Mutex::new(engine));
-            let sync = Arc::new(Mutex::new(SyncRuntime::default()));
-            // Edge <-> cloud: sync automatically on reconnect, on pending
-            // changes, and periodically (all network calls time out quickly).
-            commands::spawn_auto_sync(app.handle().clone(), engine.clone(), sync.clone());
+            // Saved sync settings (server URL, API key, toggles) survive restarts.
+            let sync = Arc::new(Mutex::new(SyncRuntime::load(&data_dir)));
+            let ollama = Arc::new(ollama);
+            let last_chat = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            // Background worker: edge <-> cloud auto-sync (on reconnect, on
+            // pending changes, periodically) + entity enrichment when idle.
+            commands::spawn_background(
+                app.handle().clone(),
+                engine.clone(),
+                sync.clone(),
+                ollama.clone(),
+                fast_model.clone(),
+                last_chat.clone(),
+            );
 
             app.manage(AppState {
                 engine,
                 conversations: Arc::new(Mutex::new(conversations)),
-                ollama: Arc::new(ollama),
+                ollama,
                 sync,
                 chat_model,
                 fast_model,
+                last_chat,
             });
             Ok(())
         })
@@ -95,6 +106,7 @@ pub fn run() {
             commands::refresh_topic,
             commands::organize_topics,
             commands::set_auto_sync,
+            commands::set_api_key,
             commands::set_pull_all,
             commands::policy_summary,
             commands::set_sync_override,

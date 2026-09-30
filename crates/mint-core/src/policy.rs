@@ -103,6 +103,75 @@ fn digit_runs(text: &str) -> Vec<(String, String)> {
     out
 }
 
+/// Digit groups of a run ("(020) 7946-0958" -> ["020", "7946", "0958"]).
+fn groups(raw: &str) -> Vec<&str> {
+    raw.split(|c: char| !c.is_ascii_digit())
+        .filter(|g| !g.is_empty())
+        .collect()
+}
+
+/// Every group is a plausible year (a list of years is not an identifier).
+fn all_years(gs: &[&str]) -> bool {
+    !gs.is_empty()
+        && gs.iter().all(|g| {
+            g.len() == 4 && g.parse::<u32>().map(|y| (1900..=2099).contains(&y)).unwrap_or(false)
+        })
+}
+
+/// Phone numbers need phone-shaped evidence, because documents are full of
+/// long digit runs (reference lists, page ranges, table cells, axis ticks):
+///   - an international prefix: "+91 98765 43210", "+1 415 555 2671";
+///   - a phone-style grouping: 2-4 groups of 3-5 digits ("98765 43210",
+///     "020 7946 0958", "(415) 555-2671", "415-555-2671");
+///   - a bare 10-digit mobile number (starts 6-9; excludes Unix timestamps);
+///   - or any 10-13 digit run right after a phone word ("call", "tel", ...).
+fn is_phone(lower: &str, digits: &str, raw: &str) -> bool {
+    let n = digits.len();
+    if !(10..=13).contains(&n) || raw.contains('.') {
+        return false;
+    }
+    let gs = groups(raw);
+    if all_years(&gs) {
+        return false;
+    }
+    if raw.starts_with('+') && gs.len() <= 5 && gs.iter().all(|g| g.len() <= 5) {
+        return true;
+    }
+    if (2..=4).contains(&gs.len()) && gs.iter().all(|g| (3..=5).contains(&g.len())) {
+        return true;
+    }
+    if gs.len() == 1 && n == 10 && matches!(digits.chars().next(), Some('6'..='9')) {
+        return true;
+    }
+    // Context: a phone word shortly before the number.
+    const WORDS: &[&str] = &[
+        "phone", "call", "mobile", "cell", "tel", "telephone", "whatsapp", "contact", "text me",
+        "reach me", "ph:", "mob",
+    ];
+    if let Some(pos) = lower.find(&raw.to_lowercase()) {
+        let start = pos.saturating_sub(30);
+        let before = &lower[lower.floor_char_boundary_compat(start)..pos];
+        if WORDS.iter().any(|w| before.contains(w)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `str::floor_char_boundary` for stable Rust: the largest char boundary <= i.
+trait FloorBoundary {
+    fn floor_char_boundary_compat(&self, i: usize) -> usize;
+}
+impl FloorBoundary for str {
+    fn floor_char_boundary_compat(&self, i: usize) -> usize {
+        let mut i = i.min(self.len());
+        while !self.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+}
+
 fn luhn(digits: &str) -> bool {
     let mut sum = 0;
     for (i, c) in digits.chars().rev().enumerate() {
@@ -214,8 +283,17 @@ fn secret(text: &str) -> Option<Finding> {
 fn financial(text: &str) -> Option<Finding> {
     for (digits, raw) in digit_runs(text) {
         let n = digits.len();
-        // Payment cards: 13-19 digits, Luhn-valid, grouped or contiguous.
-        if (13..=19).contains(&n) && luhn(&digits) && !raw.contains('.') {
+        // Payment cards: 13-19 digits, Luhn-valid, issued by a card network
+        // (leading 3-6; excludes ISBNs "978..."), contiguous or in groups of
+        // 4-6 ("4111 1111 1111 1111", Amex "3782 822463 10005").
+        let gs = groups(&raw);
+        let card_shape = gs.len() == 1 || gs.iter().all(|g| (4..=6).contains(&g.len()));
+        if (13..=19).contains(&n)
+            && matches!(digits.chars().next(), Some('3'..='6'))
+            && card_shape
+            && luhn(&digits)
+            && !raw.contains('.')
+        {
             return finding("financial", "contains a payment card number");
         }
     }
@@ -260,9 +338,18 @@ fn government_id(text: &str) -> Option<Finding> {
         {
             return finding("government_id", "contains a social security number");
         }
-        // Aadhaar: 12 digits grouped 4-4-4.
-        let groups: Vec<&str> = raw.split(|c| c == ' ' || c == '-').filter(|g| !g.is_empty()).collect();
-        if digits.len() == 12 && groups.len() == 3 && groups.iter().all(|g| g.len() == 4) {
+        // Aadhaar: 12 digits grouped 4-4-4, never starting with 0 or 1, and
+        // not a list of years ("2017 2018 2019").
+        let gs = groups(&raw);
+        let named = {
+            let l = text.to_lowercase();
+            l.contains("aadhaar") || l.contains("aadhar") || l.contains("uidai")
+        };
+        if digits.len() == 12
+            && gs.len() == 3
+            && gs.iter().all(|g| g.len() == 4)
+            && (named || (matches!(digits.chars().next(), Some('2'..='9')) && !all_years(&gs)))
+        {
             return finding("government_id", "contains a national ID number");
         }
     }
@@ -334,18 +421,12 @@ fn contact(text: &str) -> Option<Finding> {
             }
         }
     }
+    let lower = text.to_lowercase();
     for (digits, raw) in digit_runs(text) {
-        let n = digits.len();
-        let formatted = raw.starts_with('+')
-            || raw.contains('(')
-            || raw.matches(|c| c == '-' || c == ' ').count() >= 2;
-        // Phone: 10-13 digits, either internationally/visibly formatted or a
-        // bare 10-digit mobile number. Dates and decimals do not qualify.
-        if (10..=13).contains(&n) && !raw.contains('.') && (formatted || n == 10) {
+        if is_phone(&lower, &digits, &raw) {
             return finding("contact", "contains a phone number");
         }
     }
-    let lower = text.to_lowercase();
     for k in ["my address is", "i live at", "home address", "my apartment is at"] {
         if lower.contains(k) {
             return finding("contact", "contains a home address");
@@ -386,8 +467,13 @@ mod tests {
     fn personal_health_and_contact_stay_local() {
         assert_eq!(cat("I'm allergic to peanuts"), Some("health"));
         assert_eq!(cat("I was diagnosed with asthma last year"), Some("health"));
-        assert_eq!(cat("email me at yash@example.com"), Some("contact"));
+        assert_eq!(cat("email me at alex@example.com"), Some("contact"));
         assert_eq!(cat("call +91 98765 43210 tomorrow"), Some("contact"));
+        assert_eq!(cat("my number is 98765 43210"), Some("contact"));
+        assert_eq!(cat("office (415) 555-2671"), Some("contact"));
+        assert_eq!(cat("London office +44 20 7946 0958"), Some("contact"));
+        assert_eq!(cat("whatsapp 9876543210 after 6"), Some("contact"));
+        assert_eq!(cat("tel 0201234567"), Some("contact"));
         assert_eq!(cat("my address is 12 MG Road, Pune"), Some("contact"));
     }
 
@@ -406,6 +492,15 @@ mod tests {
             "Practicing piano scales for 20 minutes every day",
             "version 2026.10.02 shipped",
             "build id abc1234567890 passed",
+            // Academic papers: tables, axis ticks, references, IDs.
+            "Table 3 1 2 3 4 5 6 7 8 9 10 11 12",
+            "Brown et al. Language models are few-shot learners. NeurIPS 33:1877-1901, 2020",
+            "doi:10.1109/TPAMI.2021.3057446",
+            "arXiv preprint arXiv:2210.08481, 2022",
+            "editions published in 2017 2018 2019",
+            "event logged at unix time 1696045123",
+            "ISBN 978-0-262-03384-8",
+            "accuracy 91.2 88.4 90.1 87.9 89.5 92.3",
         ] {
             assert_eq!(scan(s), None, "should sync: {s}");
         }

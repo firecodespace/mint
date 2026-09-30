@@ -37,6 +37,10 @@ struct MetaData {
     /// on this device). Overrides the automatic policy.
     #[serde(default)]
     policy_overrides: HashMap<String, bool>,
+    /// Memories whose entities have been extracted (even if none were found),
+    /// so background enrichment never repeats work.
+    #[serde(default)]
+    entity_checked: HashSet<String>,
 }
 
 /// Bookkeeping for a topic's rolling summary and naming.
@@ -182,6 +186,17 @@ impl MetaStore {
             self.data.synced.insert(id.clone(), ts.clone());
         }
         self.save()
+    }
+
+    // ---- entity enrichment ----
+    pub fn is_entity_checked(&self, id: &str) -> bool {
+        self.data.entity_checked.contains(id)
+    }
+    pub fn mark_entity_checked(&mut self, id: &str) -> Result<()> {
+        if self.data.entity_checked.insert(id.to_string()) {
+            self.save()?;
+        }
+        Ok(())
     }
 
     // ---- user policy overrides ----

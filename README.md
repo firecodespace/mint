@@ -603,5 +603,4 @@ src/                     React UI
 - Not yet built: a localhost API and CLI, image understanding, an OS-vault for secrets.
 
 ---
-
-_Xarch Labs_
+Thank You

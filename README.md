@@ -59,45 +59,49 @@ meaningful edge-to-cloud AI workflow rather than just a local vector database.
 ## 3. Architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph UI["Desktop UI (React)"]
+        direction LR
         Chat[Chat + Cognition]
         Graph[Memory graph]
         Vault[Vault]
         Timeline[Timeline]
         SyncUI[Sync + policy]
+        Chat ~~~ Graph ~~~ Vault ~~~ Timeline ~~~ SyncUI
     end
 
     subgraph App["Tauri host (Rust)"]
+        direction LR
         Cmds[Commands]
-        Worker["Background worker<br/>auto-sync + enrichment"]
+        Worker["Background worker:<br/>auto-sync + enrichment"]
+        Cmds ~~~ Worker
     end
 
     subgraph Core["mint-core engine (Rust library)"]
+        direction LR
         Ingest[Ingestion]
         Retrieve[Topic-aware retrieval]
-        Organize["Organization<br/>topics, entities, summaries"]
+        Organize["Topics, entities,<br/>summaries"]
         Versions[Version chains]
         Policy[Sync policy]
         SyncEng[3-way merge sync]
+        Ingest ~~~ Retrieve ~~~ Organize ~~~ Versions ~~~ Policy ~~~ SyncEng
     end
 
-    subgraph Device["On device"]
+    subgraph Device["On this device"]
+        direction LR
         Edge[(Qdrant Edge shard)]
         Embed[fastembed MiniLM + BM25]
         LLM[Ollama local LLMs]
+        Edge ~~~ Embed ~~~ LLM
     end
 
     Cloud[(Qdrant Server)]
 
-    UI <--> Cmds
-    Cmds --> Core
-    Worker --> Core
-    Core --> Edge
-    Core --> Embed
-    Core --> LLM
-    SyncEng <-->|when online| Cloud
-    Retrieve -.->|cloud search when online| Cloud
+    UI --> App
+    App --> Core
+    Core --> Device
+    Core <-->|sync and cloud search, when online| Cloud
 ```
 
 The engine (`crates/mint-core`) is a standalone Rust library: the desktop app is one
@@ -115,28 +119,31 @@ chunk nodes, written in one batched embedding call, one upsert, and one flush.
 
 ### 4.2 Ingestion
 
+**A chat turn**
+
 ```mermaid
 flowchart TD
-    subgraph ChatTurn["Chat turn"]
-        M[Your message] --> G{"Capture guard:<br/>statement, or question/command?"}
-        G -->|question / command| Skip[Nothing stored]
-        G -->|statement| X[LLM extracts durable facts]
-        X --> D{Near-duplicate?}
-        D -->|yes| Skip
-        D -->|no| S[Store + policy decision]
-        S --> E[Link entities]
-        E --> R[Route to a topic]
-        R --> V["Check: does it update an older fact?"]
-        M --> T[LLM extracts dated tasks] --> TL[Timeline, versioned too]
-    end
+    M[Your message] --> G{"Capture guard:<br/>statement, or question/command?"}
+    G -->|question or command| Skip[Nothing stored]
+    G -->|statement| X[LLM extracts durable facts]
+    X --> D{Near-duplicate?}
+    D -->|yes| Skip
+    D -->|no| S["Store, with a sync-policy decision"]
+    S --> E[Link entities]
+    E --> R[Route to a topic]
+    R --> V["Does it update an older fact?<br/>Chain the versions"]
+    M --> T[LLM extracts dated tasks] --> TL["Timeline<br/>(rescheduling is versioned too)"]
+```
 
-    subgraph Docs["Document (PDF / text / code)"]
-        F[File] --> P["Parse: pdfium, fallback pdf-extract"]
-        P --> C["Semantic chunking:<br/>headings, paragraphs, sentences"]
-        C --> B[Batched embedding + one upsert]
-        B --> RT["Route: Profile topic for resumes/CVs,<br/>else nearest subject"]
-        RT --> SUM[Refresh the topic summary]
-    end
+**A document (PDF, text, Markdown, code)**
+
+```mermaid
+flowchart TD
+    F[File] --> P["Parse: pdfium, fallback pdf-extract"]
+    P --> C["Semantic chunking:<br/>headings, paragraphs, sentences"]
+    C --> B[Batched embedding, one upsert, one flush]
+    B --> RT["Route: Profile topic for resumes and CVs,<br/>otherwise the nearest subject"]
+    RT --> SUM[Refresh the topic summary]
 ```
 
 The capture guard stops questions, requests, and commands ("check my resume", "set a
@@ -296,7 +303,7 @@ and `--judge` exercise the local language models.
 ### Retrieval quality (chat pipeline, before and after)
 
 ```mermaid
-xychart-beta
+xychart-beta horizontal
     title "Chat retrieval: original pipeline vs Mint today"
     x-axis ["Hit@1 before", "Hit@1 now", "MRR before", "MRR now", "nDCG@6 before", "nDCG@6 now", "Recall@6 before", "Recall@6 now"]
     y-axis "score" 0 --> 1
@@ -314,7 +321,7 @@ xychart-beta
 ### Organization quality
 
 ```mermaid
-xychart-beta
+xychart-beta horizontal
     title "Topic grouping (pairwise F1)"
     x-axis ["Original", "kNN routing", "+ consolidation"]
     y-axis "F1" 0 --> 1

@@ -1,3 +1,9 @@
+# ---------------------------------------------------------------------------
+# Mint .gitignore
+# Keep the public repo to what is needed to build, run, test and benchmark
+# Mint. Never commit personal data, secrets, models, or native binaries.
+# ---------------------------------------------------------------------------
+
 # Node / frontend
 node_modules/
 dist/
@@ -5,30 +11,48 @@ dist-ssr/
 *.local
 .vite/
 
-# Rust / Tauri
-src-tauri/target/
+# Rust / Tauri build output
 target/
+src-tauri/target/
+src-tauri/gen/
 
-# fastembed model cache (downloaded on first run)
+# Local memory store and app data (personal data: memories, documents,
+# conversations, sync settings including any API key)
+.mint-data/
+data/
+*.qdrant/
+sync.json
+
+# Downloaded models (fastembed ONNX cache) and native libraries (pdfium);
+# fetched per machine, see README "Install"
 .fastembed_cache/
 models/
-
-# Native pdfium library (downloaded separately; see README)
 lib/
+*.dll
+*.dylib
+*.so
 
-# Qdrant Edge on-disk data (local memory store)
-data/
-.mint-data/
-*.qdrant/
+# Benchmark outputs (regenerate with the benchmark; see README "Benchmarks")
+crates/mint-core/bench-results/
 
-# Env / secrets
+# Internal planning documents (not part of the public repo)
+SPEC.md
+internal/
+
+# Secrets and environment files
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
 
-# Editor / OS
+# Editor / OS / tooling
 .vscode/
 .idea/
+.claude/
 .DS_Store
 Thumbs.db
 *.log
+*.tmp
